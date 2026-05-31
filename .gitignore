@@ -1,26 +1,79 @@
-bin/*
-obj/*
-Service References/*
+# Build output
+[Bb]in/
+[Oo]bj/
+**/[Bb]in/
+**/[Oo]bj/
+Debug/
+Release/
+x64/
+x86/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+publish/
+artifacts/
+TestResults/
+coverage/
+*.nupkg
+*.snupkg
+
+# Visual Studio / Rider
+.vs/
+.idea/
 *.suo
 *.user
-EVE Isk per Hour.vbproj
+*.userosscache
+*.sln.docstates
+*.rsuser
+*.DotSettings.user
 *.vsidx
-*.json
-*.json
-EVE-IPH-Update-Program/obj/x86/Debug/EVEIPH Updater.exe
-EVE-IPH-Update-Program/obj/x86/Debug/EVEIPH Updater.pdb
-EVE-IPH-Update-Program/obj/x86/Debug/EVEIPH Updater.vbproj.AssemblyReference.cache
-EVE-IPH-Update-Program/obj/x86/Debug/EVEIPH Updater.vbproj.FileListAbsolute.txt
-EVEIPH SQLite DLL Updater/obj/Debug/EVEIPH SQLite DLL Updater.exe
-EVEIPH SQLite DLL Updater/obj/Debug/EVEIPH SQLite DLL Updater.pdb
-EVEIPH SQLite DLL Updater/obj/Debug/EVEIPH SQLite DLL Updater.vbproj.AssemblyReference.cache
-Root Directory/EVEIPH SQLite DLL Updater.exe
-Root Directory/EVEIPH SQLite DLL Updater.pdb
+*.pidb
+*.svclog
+*.aps
+
+# .NET generated files
+*.AssemblyReference.cache
+*.CoreCompileInputs.cache
+*.GenerateResource.cache
+*.FileListAbsolute.txt
+*.GeneratedMSBuildEditorConfig.editorconfig
+*.GlobalUsings.g.cs
+*.g.cs
+*.g.i.cs
+*.baml
+*.Up2Date
+project.assets.json
+project.nuget.cache
+*.nuget.g.props
+*.nuget.g.targets
+rider.project.model.nuget.info
+rider.project.restore.info
+
+# Binaries and symbols
+*.exe
+*.dll
+*.pdb
 *.cache
-EVEIPH SQLite DLL Updater/obj/Debug/DesignTimeResolveAssemblyReferencesInput.cache
-EVEIPH SQLite DLL Updater/obj/Debug/EVEIPH SQLite DLL Updater.vbproj.AssemblyReference.cache
-*.cache
-*.cache
-EVEIPH SQLite DLL Updater/obj/Debug/EVEIPH SQLite DLL Updater.vbproj.AssemblyReference.cache
-EVE-IPH-Update-Program/obj/x86/Debug/DesignTimeResolveAssemblyReferencesInput.cache
-EVEIPH SQLite DLL Updater/obj/Debug/DesignTimeResolveAssemblyReferencesInput.cache
+*.log
+*.tmp
+*.temp
+
+# Local application data / exported plans
+settings.json
+fuzzworks-prices.json
+industry-cost-indexes.json
+production-ledger*.json
+*.ledger.json
+
+# Local EVE SDE dump
+modern/EveIndustryPlanner/src/sde/
+sde/
+
+# Legacy generated/service output
+Service References/
+Root Directory/*.exe
+Root Directory/*.pdb
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store

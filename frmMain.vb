@@ -340,6 +340,13 @@ Public Class frmMain
         Application.DoEvents()
         EVEDB = New DBConnection(DBFilePath, SQLiteDBFileName)
 
+        If Not RequiredDatabaseTablesAvailable() Then
+            MsgBox("The local EVE IPH database is missing required tables and cannot be used with this application version." & Environment.NewLine & Environment.NewLine _
+                   & "Run the updater, or place a current " & SQLiteDBFileName & " beside the executable." & Environment.NewLine & Environment.NewLine _
+                   & "Database path: " & Path.Combine(DBFilePath, SQLiteDBFileName), vbCritical, Application.ProductName)
+            End
+        End If
+
         ' For speed on ESI calls
         ServicePointManager.DefaultConnectionLimit = 20
         ServicePointManager.UseNagleAlgorithm = False
@@ -967,6 +974,10 @@ Public Class frmMain
     Private Sub DisplayESIStatusMessages()
         Dim SQL As String = ""
         Dim rsStatus As SQLiteDataReader
+
+        If Not ESIStatusTablesAvailable() Then
+            Exit Sub
+        End If
 
         Dim CharacterTokenData As SavedTokenData = SelectedCharacter.CharacterTokenData
 

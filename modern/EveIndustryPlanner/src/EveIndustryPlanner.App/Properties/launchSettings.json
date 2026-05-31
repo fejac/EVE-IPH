@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json.schemastore.org/launchsettings.json",
+  "profiles": {
+    "EveIndustryPlanner.App": {
+      "commandName": "Project",
+      "workingDirectory": "$(ProjectDir)..\\..\\..\\",
+      "nativeDebugging": false
+    }
+  }
+}

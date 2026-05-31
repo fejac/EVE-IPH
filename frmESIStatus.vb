@@ -16,6 +16,11 @@ Public Class frmESIStatus
         lstStatus.Items.Clear()
         lstStatus.BeginUpdate()
 
+        If Not ESIStatusTablesAvailable() Then
+            lstStatus.EndUpdate()
+            Exit Sub
+        End If
+
         If SelectedCharacter.CharacterTokenData.Scopes = "No Scopes" Then
             lstStatus.EndUpdate()
             Exit Sub

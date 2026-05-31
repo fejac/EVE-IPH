@@ -1531,6 +1531,10 @@ Public Class ESI
     Public Sub GetESIStatus(Optional ByRef UpdateLabel As Label = Nothing, Optional ByRef PB As ProgressBar = Nothing)
         Try
 
+            If Not ESIStatusTablesAvailable() Then
+                Exit Sub
+            End If
+
             Dim TempLabel As Label
             Dim TempPB As ProgressBar
             Dim RawData As String

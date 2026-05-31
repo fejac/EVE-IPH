@@ -2798,6 +2798,38 @@ SkipItem:
 
     End Function
 
+    Public Function DBTableExists(ByVal TableName As String) As Boolean
+        If IsNothing(EVEDB) Then
+            Return False
+        End If
+
+        Try
+            Using TableCheckCommand As New SQLiteCommand("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = @TABLE_NAME LIMIT 1", EVEDB.DBREf)
+                TableCheckCommand.Parameters.AddWithValue("@TABLE_NAME", TableName)
+                Return Not IsNothing(TableCheckCommand.ExecuteScalar())
+            End Using
+        Catch ex As Exception
+            Call WriteMsgToLog("Unable to check table existence for " & TableName & ": " & ex.Message)
+            Return False
+        End Try
+    End Function
+
+    Public Function ESIStatusTablesAvailable() As Boolean
+        Return DBTableExists("ESI_STATUS_ITEMS") And DBTableExists("ESI_ENDPOINT_ROUTE_TO_SCOPE")
+    End Function
+
+    Public Function RequiredDatabaseTablesAvailable() As Boolean
+        Dim RequiredTables As String() = {"ESI_CHARACTER_DATA", "ESI_CORPORATION_DATA", "INVENTORY_TYPES", "ITEM_PRICES"}
+
+        For Each TableName In RequiredTables
+            If Not DBTableExists(TableName) Then
+                Return False
+            End If
+        Next
+
+        Return True
+    End Function
+
     ' Looks up the relic based on the decryptor used and the runs sent on the bp the relic created
     Public Function GetRelicfromInputs(ByVal DecryptorUsed As Decryptor, BPID As Long, BPRuns As Integer) As String
 
