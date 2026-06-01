@@ -4,7 +4,7 @@ using System.Text.Json.Serialization;
 
 namespace EveIndustryPlanner.Core;
 
-public sealed class FuzzworksMarketPriceProvider : IMarketPriceProvider
+public sealed class FuzzworksMarketPriceProvider : IMarketPriceProvider, IMarketOrderBookProvider
 {
     public const long TheForgeRegionId = 10000002;
 
@@ -19,8 +19,10 @@ public sealed class FuzzworksMarketPriceProvider : IMarketPriceProvider
     private readonly string cacheFilePath;
     private readonly long regionId;
     private readonly TimeSpan cacheDuration;
+    private readonly TimeSpan orderBookCacheDuration = TimeSpan.FromMinutes(5);
     private readonly SemaphoreSlim cacheLock = new(1, 1);
     private Dictionary<string, CachedMarketPrice>? cache;
+    private readonly Dictionary<string, CachedMarketOrders> orderBookCache = [];
 
     public FuzzworksMarketPriceProvider(
         string cacheFilePath,
@@ -81,6 +83,67 @@ public sealed class FuzzworksMarketPriceProvider : IMarketPriceProvider
         }
     }
 
+    public async Task<EffectiveMarketPrice?> GetEffectivePriceAsync(TypeId typeId, PriceProfile profile, MarketPriceSelection selection, long quantity, CancellationToken cancellationToken)
+    {
+        if (selection != MarketPriceSelection.InstantBuy || quantity <= 0)
+        {
+            return null;
+        }
+
+        var scope = MarketLocationScope.From(profile.MarketLocationId, regionId);
+        if (scope is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            var orders = await DownloadMarketOrdersAsync(typeId, scope, cancellationToken);
+            var remaining = quantity;
+            var totalPrice = 0m;
+            var filledQuantity = 0L;
+
+            foreach (var order in orders.OrderBy(order => order.Price))
+            {
+                var usedQuantity = Math.Min(remaining, order.VolumeRemaining);
+                totalPrice += usedQuantity * order.Price;
+                filledQuantity += usedQuantity;
+                remaining -= usedQuantity;
+
+                if (remaining <= 0)
+                {
+                    break;
+                }
+            }
+
+            if (filledQuantity == 0)
+            {
+                return null;
+            }
+
+            var pricedQuantity = Math.Min(quantity, filledQuantity);
+            return new EffectiveMarketPrice
+            {
+                UnitPrice = totalPrice / pricedQuantity,
+                TotalPrice = totalPrice,
+                FilledQuantity = filledQuantity,
+                RequestedQuantity = quantity
+            };
+        }
+        catch (HttpRequestException)
+        {
+            return null;
+        }
+        catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
     private async Task<CachedMarketPrice?> DownloadPriceAsync(TypeId typeId, long locationId, CancellationToken cancellationToken)
     {
         var url = $"https://market.fuzzwork.co.uk/aggregates/?region={locationId}&types={typeId.Value}";
@@ -113,6 +176,44 @@ public sealed class FuzzworksMarketPriceProvider : IMarketPriceProvider
             SellPercentilePrice = price.Sell.Percentile,
             FetchedAt = DateTimeOffset.UtcNow
         };
+    }
+
+    private async Task<List<EsiMarketOrder>> DownloadMarketOrdersAsync(TypeId typeId, MarketLocationScope scope, CancellationToken cancellationToken)
+    {
+        var cacheKey = $"{scope.RegionId}:{scope.SystemId}:{scope.LocationId}:{typeId.Value}:sell";
+        if (orderBookCache.TryGetValue(cacheKey, out var cachedOrders) && DateTimeOffset.UtcNow - cachedOrders.FetchedAt <= orderBookCacheDuration)
+        {
+            return cachedOrders.Orders;
+        }
+
+        var orders = new List<EsiMarketOrder>();
+        var page = 1;
+        var totalPages = 1;
+
+        do
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, $"https://esi.evetech.net/latest/markets/{scope.RegionId}/orders/?datasource=tranquility&order_type=sell&type_id={typeId.Value}&page={page}");
+            using var response = await httpClient.SendAsync(request, cancellationToken);
+            response.EnsureSuccessStatusCode();
+
+            if (page == 1 && response.Headers.TryGetValues("X-Pages", out var values) && int.TryParse(values.FirstOrDefault(), out var parsedPages))
+            {
+                totalPages = Math.Max(1, parsedPages);
+            }
+
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            var pageOrders = await JsonSerializer.DeserializeAsync<List<EsiMarketOrder>>(stream, JsonOptions, cancellationToken);
+            if (pageOrders is not null)
+            {
+                orders.AddRange(pageOrders.Where(scope.Contains));
+            }
+
+            page++;
+        }
+        while (page <= totalPages);
+
+        orderBookCache[cacheKey] = new CachedMarketOrders(orders, DateTimeOffset.UtcNow);
+        return orders;
     }
 
     private async Task<Dictionary<string, CachedMarketPrice>> LoadCacheAsync(CancellationToken cancellationToken)
@@ -209,5 +310,65 @@ public sealed class FuzzworksMarketPriceProvider : IMarketPriceProvider
 
         [JsonPropertyName("percentile")]
         public decimal Percentile { get; init; }
+    }
+
+    private sealed class EsiMarketOrder
+    {
+        [JsonPropertyName("location_id")]
+        public long LocationId { get; init; }
+
+        [JsonPropertyName("system_id")]
+        public long SystemId { get; init; }
+
+        [JsonPropertyName("volume_remain")]
+        public long VolumeRemaining { get; init; }
+
+        [JsonPropertyName("price")]
+        public decimal Price { get; init; }
+    }
+
+    private sealed record CachedMarketOrders(List<EsiMarketOrder> Orders, DateTimeOffset FetchedAt);
+
+    private sealed record MarketLocationScope(long RegionId, long? SystemId, long? LocationId)
+    {
+        public bool Contains(EsiMarketOrder order)
+        {
+            if (LocationId is not null)
+            {
+                return order.LocationId == LocationId.Value;
+            }
+
+            if (SystemId is not null)
+            {
+                return order.SystemId == SystemId.Value;
+            }
+
+            return true;
+        }
+
+        public static MarketLocationScope? From(long locationId, long defaultRegionId)
+        {
+            if (locationId <= 0)
+            {
+                return new MarketLocationScope(defaultRegionId, null, null);
+            }
+
+            if (locationId is >= 10_000_000 and < 20_000_000)
+            {
+                return new MarketLocationScope(locationId, null, null);
+            }
+
+            return locationId switch
+            {
+                30000142 => new MarketLocationScope(TheForgeRegionId, 30000142, null),
+                30000144 => new MarketLocationScope(TheForgeRegionId, 30000144, null),
+                60003760 => new MarketLocationScope(TheForgeRegionId, null, 60003760),
+                60008494 => new MarketLocationScope(10000043, null, 60008494),
+                60011866 => new MarketLocationScope(10000032, null, 60011866),
+                60004588 => new MarketLocationScope(10000030, null, 60004588),
+                60005686 => new MarketLocationScope(10000042, null, 60005686),
+                _ => null
+            };
+        }
     }
 }

@@ -8,6 +8,8 @@
         MinHeight="640"
         Background="#f3f4f6">
     <Window.Resources>
+        <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter" />
+
         <Style x:Key="PanelBorder" TargetType="Border">
             <Setter Property="Background" Value="White" />
             <Setter Property="BorderBrush" Value="#d8dee8" />
@@ -351,6 +353,90 @@
                             </Border>
                         </Grid>
                     </Grid>
+                </Grid>
+            </TabItem>
+
+            <TabItem Header="Market Scanner">
+                <Grid Margin="0,10,0,0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+
+                    <Border Grid.Row="0" Style="{StaticResource PanelBorder}" Margin="0,0,0,14">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="180" />
+                                <ColumnDefinition Width="120" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+
+                            <StackPanel Grid.Column="0" Margin="0,0,12,0">
+                                <TextBlock Text="Item Type" FontSize="12" Foreground="#526176" />
+                                <ComboBox ItemsSource="{Binding MarketScannerFilters}"
+                                          SelectedItem="{Binding SelectedMarketScannerFilter}"
+                                          DisplayMemberPath="Name" />
+                            </StackPanel>
+
+                            <StackPanel Grid.Column="1" Margin="0,0,12,0">
+                                <TextBlock Text="Max Items" FontSize="12" Foreground="#526176" />
+                                <TextBox Text="{Binding MarketScannerMaxItems, UpdateSourceTrigger=PropertyChanged}" />
+                            </StackPanel>
+
+                            <StackPanel Grid.Column="2" VerticalAlignment="Center">
+                                <TextBlock Text="{Binding MarketScannerStatusText}" FontWeight="SemiBold" />
+                                <TextBlock Text="{Binding MarketScannerProgressText}" Foreground="#526176" FontSize="12" />
+                                <ProgressBar Margin="0,8,0,0"
+                                             Height="6"
+                                             IsIndeterminate="True"
+                                             Visibility="{Binding IsMarketScannerBusy, Converter={StaticResource BooleanToVisibilityConverter}}" />
+                            </StackPanel>
+
+                            <Button Grid.Column="3"
+                                    Content="Scan Market"
+                                    Width="130"
+                                    VerticalAlignment="Center"
+                                    Command="{Binding RunMarketScannerCommand}" />
+                        </Grid>
+                    </Border>
+
+                    <Border Grid.Row="1" Style="{StaticResource PanelBorder}">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+
+                            <DockPanel Margin="0,0,0,10">
+                                <TextBlock Text="Manufacturing Opportunities" FontSize="16" FontWeight="SemiBold" DockPanel.Dock="Left" />
+                            </DockPanel>
+
+                            <DataGrid Grid.Row="1"
+                                      ItemsSource="{Binding MarketScannerResults}"
+                                      AutoGenerateColumns="False"
+                                      CanUserAddRows="False"
+                                      IsReadOnly="True"
+                                      GridLinesVisibility="Horizontal"
+                                      HeadersVisibility="Column">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Product" Binding="{Binding ProductName}" Width="2*" />
+                                    <DataGridTextColumn Header="Type" Binding="{Binding ItemType}" Width="120" />
+                                    <DataGridTextColumn Header="Activity" Binding="{Binding Activity}" Width="110" />
+                                    <DataGridTextColumn Header="Output" Binding="{Binding OutputQuantity, StringFormat=N0}" Width="90" />
+                                    <DataGridTextColumn Header="Material Cost" Binding="{Binding MaterialCost, StringFormat=N2}" Width="130" />
+                                    <DataGridTextColumn Header="Job Cost" Binding="{Binding JobCost, StringFormat=N2}" Width="120" />
+                                    <DataGridTextColumn Header="Total Cost" Binding="{Binding TotalCost, StringFormat=N2}" Width="130" />
+                                    <DataGridTextColumn Header="Sell Value" Binding="{Binding Revenue, StringFormat=N2}" Width="130" />
+                                    <DataGridTextColumn Header="Profit" Binding="{Binding Profit, StringFormat=N2}" Width="130" />
+                                    <DataGridTextColumn Header="Margin" Binding="{Binding Margin, StringFormat=P2}" Width="90" />
+                                    <DataGridTextColumn Header="ISK / Hour" Binding="{Binding IskPerHour, StringFormat=N2}" Width="130" />
+                                    <DataGridTextColumn Header="Time" Binding="{Binding ProductionTimeText}" Width="100" />
+                                    <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="160" />
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </Grid>
+                    </Border>
                 </Grid>
             </TabItem>
 

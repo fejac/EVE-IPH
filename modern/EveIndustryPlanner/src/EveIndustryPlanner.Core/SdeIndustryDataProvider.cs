@@ -7,7 +7,7 @@ using YamlDotNet.Serialization;
 
 namespace EveIndustryPlanner.Core;
 
-public sealed class SdeIndustryDataProvider(string sdeDirectory) : IBlueprintRepository, IMarketPriceProvider, ISolarSystemRepository
+public sealed class SdeIndustryDataProvider(string sdeDirectory) : IBlueprintRepository, IBlueprintCatalogProvider, IMarketPriceProvider, ISolarSystemRepository
 {
     private readonly Lazy<Task<SdeData>> data = new(() => LoadAsync(sdeDirectory));
 
@@ -54,6 +54,30 @@ public sealed class SdeIndustryDataProvider(string sdeDirectory) : IBlueprintRep
             .ToList();
 
         return results;
+    }
+
+    public async Task<IReadOnlyList<BlueprintCatalogItem>> GetManufacturableBlueprintsAsync(CancellationToken cancellationToken)
+    {
+        var sde = await data.Value.WaitAsync(cancellationToken);
+
+        return sde.Blueprints.Values
+            .Where(blueprint => blueprint.ManufacturingProduct is not null)
+            .Select(blueprint =>
+            {
+                var productTypeId = blueprint.Product?.TypeId ?? 0;
+                var productType = GetTypeOrUnknown(sde, productTypeId);
+                return new BlueprintCatalogItem(
+                    new BlueprintId(blueprint.BlueprintTypeId),
+                    new TypeId(productTypeId),
+                    productType.GroupId,
+                    productType.CategoryId,
+                    GetTypeOrUnknown(sde, blueprint.BlueprintTypeId).Name,
+                    productType.Name,
+                    1,
+                    blueprint.ActivityType);
+            })
+            .OrderBy(item => item.ProductName)
+            .ToList();
     }
 
     public async Task<BlueprintDefinition?> GetBlueprintAsync(BlueprintId blueprintId, CancellationToken cancellationToken)

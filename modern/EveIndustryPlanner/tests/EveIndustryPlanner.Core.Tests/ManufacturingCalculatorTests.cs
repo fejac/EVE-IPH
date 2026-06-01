@@ -120,6 +120,31 @@ public sealed class ManufacturingCalculatorTests
     }
 
     [Fact]
+    public async Task CalculateAsync_InstantBuyUsesOrderBookVolumeForMaterials()
+    {
+        var calculator = new ManufacturingCalculator(new VolumeAwareRepository(), new VolumeAwarePriceProvider());
+
+        var result = await calculator.CalculateAsync(new ManufacturingRequest
+        {
+            BlueprintId = new BlueprintId(10),
+            Runs = 1,
+            MaterialEfficiency = 0,
+            TimeEfficiency = 0,
+            Facility = FacilityProfile.None,
+            PriceProfile = new PriceProfile
+            {
+                MaterialPriceSelection = MarketPriceSelection.InstantBuy,
+                ProductPriceSelection = MarketPriceSelection.SellOrder
+            }
+        }, CancellationToken.None);
+
+        var material = Assert.Single(result.Materials);
+        Assert.Equal(190, material.Quantity);
+        Assert.Equal(901_000m / 190m, material.UnitPrice);
+        Assert.Equal(901_000m, material.TotalPrice);
+    }
+
+    [Fact]
     public async Task CalculateAsync_BuildBuyBuildsCheaperManufacturingComponent()
     {
         var calculator = new ManufacturingCalculator(new BuildBuyRepository(BlueprintActivityType.Manufacturing), new BuildBuyPriceProvider());
@@ -350,6 +375,63 @@ public sealed class ManufacturingCalculatorTests
                 SellPrice = price,
                 BuyMaxPrice = price,
                 SellMinPrice = price
+            });
+        }
+    }
+
+    private sealed class VolumeAwareRepository : IBlueprintRepository
+    {
+        private readonly BlueprintDefinition blueprint = new()
+        {
+            BlueprintId = new BlueprintId(10),
+            ProductTypeId = new TypeId(20),
+            ProductName = "Product",
+            BlueprintName = "Product Blueprint",
+            ProductQuantity = 1,
+            BaseProductionTime = TimeSpan.FromMinutes(1),
+            Materials =
+            [
+                new BlueprintMaterial { TypeId = new TypeId(30), Name = "Volume Material", Quantity = 190, Volume = 1, Category = MaterialCategory.Raw }
+            ]
+        };
+
+        public Task<IReadOnlyList<BlueprintSearchResult>> SearchAsync(string query, CancellationToken cancellationToken)
+        {
+            return Task.FromResult<IReadOnlyList<BlueprintSearchResult>>([]);
+        }
+
+        public Task<BlueprintDefinition?> GetBlueprintAsync(BlueprintId blueprintId, CancellationToken cancellationToken)
+        {
+            return Task.FromResult<BlueprintDefinition?>(blueprintId == blueprint.BlueprintId ? blueprint : null);
+        }
+
+        public Task<BlueprintDefinition?> GetBlueprintByProductTypeAsync(TypeId productTypeId, CancellationToken cancellationToken)
+        {
+            return Task.FromResult<BlueprintDefinition?>(null);
+        }
+    }
+
+    private sealed class VolumeAwarePriceProvider : IMarketPriceProvider, IMarketOrderBookProvider
+    {
+        public Task<MarketPrice?> GetPriceAsync(TypeId typeId, PriceProfile profile, CancellationToken cancellationToken)
+        {
+            return Task.FromResult<MarketPrice?>(new MarketPrice
+            {
+                TypeId = typeId,
+                SellPrice = 1_000_000,
+                SellMinPrice = 1_000_000
+            });
+        }
+
+        public Task<EffectiveMarketPrice?> GetEffectivePriceAsync(TypeId typeId, PriceProfile profile, MarketPriceSelection selection, long quantity, CancellationToken cancellationToken)
+        {
+            var totalPrice = 10m * 100m + 180m * 5_000m;
+            return Task.FromResult<EffectiveMarketPrice?>(new EffectiveMarketPrice
+            {
+                UnitPrice = totalPrice / quantity,
+                TotalPrice = totalPrice,
+                FilledQuantity = quantity,
+                RequestedQuantity = quantity
             });
         }
     }

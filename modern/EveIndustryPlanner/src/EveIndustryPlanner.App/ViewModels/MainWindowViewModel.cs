@@ -13,6 +13,7 @@ namespace EveIndustryPlanner.App.ViewModels;
 public sealed class MainWindowViewModel : ObservableObject
 {
     private readonly IBlueprintRepository blueprintRepository;
+    private readonly IBlueprintCatalogProvider? blueprintCatalogProvider;
     private readonly ISolarSystemRepository solarSystemRepository;
     private readonly IIndustryCostIndexProvider industryCostIndexProvider;
     private readonly IManufacturingCalculator calculator;
@@ -82,6 +83,12 @@ public sealed class MainWindowViewModel : ObservableObject
     private int maxParallelManufacturingJobs = 10;
     private int maxParallelReactionJobs = 5;
     private CharacterAccountOption? selectedCharacterAccount;
+    private MarketScannerFilterOption selectedMarketScannerFilter;
+    private int marketScannerMaxItems = 100;
+    private bool isMarketScannerBusy;
+    private string marketScannerStatusText = "Scanner ready.";
+    private string marketScannerProgressText = string.Empty;
+    private readonly Dictionary<string, MarketScannerCacheEntry> marketScannerCache = new(StringComparer.Ordinal);
 
     private static readonly JsonSerializerOptions LedgerJsonOptions = new()
     {
@@ -137,6 +144,7 @@ public sealed class MainWindowViewModel : ObservableObject
         UserSettingsService? userSettingsService = null)
     {
         this.blueprintRepository = blueprintRepository;
+        blueprintCatalogProvider = blueprintRepository as IBlueprintCatalogProvider;
         this.solarSystemRepository = solarSystemRepository;
         this.industryCostIndexProvider = industryCostIndexProvider;
         this.calculator = calculator;
@@ -157,6 +165,7 @@ public sealed class MainWindowViewModel : ObservableObject
         selectedBuildBuyDepth = FindBuildBuyDepth(settings.BuildBuyDepth);
         selectedProductionPlannerScope = ProductionPlannerScopes.First(option => option.Scope == ProductionPlannerScope.AllLedgerItems);
         selectedProductionJobFilter = ProductionJobFilters.First(option => option.Filter == ProductionJobFilter.Open);
+        selectedMarketScannerFilter = MarketScannerFilters.First(option => option.Filter == MarketScannerFilter.All);
         enableBuildBuy = settings.EnableBuildBuy;
         maxBuildBuyDepth = Math.Clamp(settings.MaxBuildBuyDepth, 0, 20);
         LoadFacilityProfiles(settings);
@@ -184,6 +193,7 @@ public sealed class MainWindowViewModel : ObservableObject
         AddCharacterCommand = new AsyncRelayCommand(AddCharacterAsync, () => !IsBusy);
         RefreshCharacterTokenCommand = new AsyncRelayCommand(RefreshSelectedCharacterTokenAsync, () => SelectedCharacterAccount is not null && !IsBusy);
         DeleteCharacterCommand = new RelayCommand(DeleteSelectedCharacter, () => SelectedCharacterAccount is not null);
+        RunMarketScannerCommand = new AsyncRelayCommand(RunMarketScannerAsync, () => !IsBusy && !IsMarketScannerBusy && blueprintCatalogProvider is not null);
         _ = SearchAsync();
         _ = SearchSolarSystemsAsync();
     }
@@ -203,6 +213,8 @@ public sealed class MainWindowViewModel : ObservableObject
     public ObservableCollection<SolarSystemOption> SolarSystemResults { get; } = [];
 
     public ObservableCollection<CharacterAccountOption> CharacterAccounts { get; } = [];
+
+    public ObservableCollection<MarketScannerResultRow> MarketScannerResults { get; } = [];
 
     private static FacilityRigOption EmptyRigOption { get; } =
         new(FacilityFittingCalculator.NoneRigId, "Empty Slot", FacilityRigSize.None, FacilityServiceRole.Manufacturing, string.Empty);
@@ -244,6 +256,19 @@ public sealed class MainWindowViewModel : ObservableObject
         new("Direct Materials Only", BuildBuyDepth.DirectMaterialsOnly),
         new("Build Components", BuildBuyDepth.BuildManufacturingComponents),
         new("Build Components + Reactions", BuildBuyDepth.BuildManufacturingAndReactions)
+    ];
+
+    public IReadOnlyList<MarketScannerFilterOption> MarketScannerFilters { get; } =
+    [
+        new("All", MarketScannerFilter.All),
+        new("Reactions", MarketScannerFilter.Reactions),
+        new("Components", MarketScannerFilter.Components),
+        new("Ships", MarketScannerFilter.Ships),
+        new("Modules", MarketScannerFilter.Modules),
+        new("Drones / Fighters", MarketScannerFilter.DronesAndFighters),
+        new("Charges", MarketScannerFilter.Charges),
+        new("Structures", MarketScannerFilter.Structures),
+        new("Other", MarketScannerFilter.Other)
     ];
 
     public IReadOnlyList<ProductionPlannerScopeOption> ProductionPlannerScopes { get; } =
@@ -316,6 +341,8 @@ public sealed class MainWindowViewModel : ObservableObject
     public ICommand RefreshCharacterTokenCommand { get; }
 
     public ICommand DeleteCharacterCommand { get; }
+
+    public ICommand RunMarketScannerCommand { get; }
 
     public int SelectedWorkspaceTab
     {
@@ -827,10 +854,52 @@ public sealed class MainWindowViewModel : ObservableObject
         }
     }
 
+    public bool IsMarketScannerBusy
+    {
+        get => isMarketScannerBusy;
+        private set
+        {
+            if (SetProperty(ref isMarketScannerBusy, value))
+            {
+                RaiseCommandStates();
+            }
+        }
+    }
+
     public string StatusText
     {
         get => statusText;
         private set => SetProperty(ref statusText, value);
+    }
+
+    public MarketScannerFilterOption SelectedMarketScannerFilter
+    {
+        get => selectedMarketScannerFilter;
+        set
+        {
+            if (value is not null)
+            {
+                SetProperty(ref selectedMarketScannerFilter, value);
+            }
+        }
+    }
+
+    public int MarketScannerMaxItems
+    {
+        get => marketScannerMaxItems;
+        set => SetProperty(ref marketScannerMaxItems, Math.Max(0, value));
+    }
+
+    public string MarketScannerStatusText
+    {
+        get => marketScannerStatusText;
+        private set => SetProperty(ref marketScannerStatusText, value);
+    }
+
+    public string MarketScannerProgressText
+    {
+        get => marketScannerProgressText;
+        private set => SetProperty(ref marketScannerProgressText, value);
     }
 
     public CharacterAccountOption? SelectedCharacterAccount
@@ -1182,29 +1251,7 @@ public sealed class MainWindowViewModel : ObservableObject
 
         try
         {
-            Result = await calculator.CalculateAsync(new ManufacturingRequest
-            {
-                BlueprintId = SelectedBlueprint.BlueprintId,
-                Runs = Runs,
-                MaterialEfficiency = MaterialEfficiency,
-                TimeEfficiency = TimeEfficiency,
-                AdditionalCosts = AdditionalCosts,
-                EnableBuildBuy = EnableBuildBuy,
-                BuildBuyDepth = SelectedBuildBuyDepth.Depth,
-                MaxBuildBuyDepth = MaxBuildBuyDepth,
-                FinalProductFacility = SelectedFinalProductFacility.ToFacilityProfile(),
-                ComponentFacility = SelectedComponentFacility.ToFacilityProfile(),
-                ReactionFacility = SelectedReactionFacility.ToFacilityProfile(),
-                PriceProfile = new PriceProfile
-                {
-                    MaterialPriceSelection = SelectedMaterialPriceStrategy.Selection,
-                    ProductPriceSelection = SelectedProductPriceStrategy.Selection,
-                    MaterialMarketLocationId = SelectedMaterialMarket.LocationId,
-                    MaterialMarketLocationName = SelectedMaterialMarket.Name,
-                    ProductMarketLocationId = SelectedProductMarket.LocationId,
-                    ProductMarketLocationName = SelectedProductMarket.Name
-                }
-            }, CancellationToken.None);
+            Result = await calculator.CalculateAsync(CreateManufacturingRequest(SelectedBlueprint.BlueprintId), CancellationToken.None);
 
             Materials.Clear();
             foreach (var material in Result.Materials)
@@ -1225,6 +1272,226 @@ public sealed class MainWindowViewModel : ObservableObject
             IsBusy = false;
             RaiseCommandStates();
         }
+    }
+
+    private ManufacturingRequest CreateManufacturingRequest(BlueprintId blueprintId)
+    {
+        return new ManufacturingRequest
+        {
+            BlueprintId = blueprintId,
+            Runs = Runs,
+            MaterialEfficiency = MaterialEfficiency,
+            TimeEfficiency = TimeEfficiency,
+            AdditionalCosts = AdditionalCosts,
+            EnableBuildBuy = EnableBuildBuy,
+            BuildBuyDepth = SelectedBuildBuyDepth.Depth,
+            MaxBuildBuyDepth = MaxBuildBuyDepth,
+            FinalProductFacility = SelectedFinalProductFacility.ToFacilityProfile(),
+            ComponentFacility = SelectedComponentFacility.ToFacilityProfile(),
+            ReactionFacility = SelectedReactionFacility.ToFacilityProfile(),
+            PriceProfile = new PriceProfile
+            {
+                MaterialPriceSelection = SelectedMaterialPriceStrategy.Selection,
+                ProductPriceSelection = SelectedProductPriceStrategy.Selection,
+                MaterialMarketLocationId = SelectedMaterialMarket.LocationId,
+                MaterialMarketLocationName = SelectedMaterialMarket.Name,
+                ProductMarketLocationId = SelectedProductMarket.LocationId,
+                ProductMarketLocationName = SelectedProductMarket.Name
+            }
+        };
+    }
+
+    private async Task RunMarketScannerAsync()
+    {
+        if (blueprintCatalogProvider is null)
+        {
+            MarketScannerStatusText = "Blueprint catalog is not available.";
+            return;
+        }
+
+        var cacheKey = BuildMarketScannerCacheKey();
+        if (marketScannerCache.TryGetValue(cacheKey, out var cached) && DateTimeOffset.UtcNow - cached.CreatedAt <= TimeSpan.FromMinutes(5))
+        {
+            ApplyMarketScannerResults(cached.Rows);
+            MarketScannerStatusText = $"Loaded {cached.Rows.Count:N0} cached scanner rows from {cached.CreatedAt.LocalDateTime:g}.";
+            MarketScannerProgressText = "Cache hit.";
+            return;
+        }
+
+        IsBusy = true;
+        IsMarketScannerBusy = true;
+        StatusText = "Scanning market";
+        MarketScannerStatusText = "Loading blueprint catalog.";
+        MarketScannerProgressText = string.Empty;
+
+        try
+        {
+            var catalog = await blueprintCatalogProvider.GetManufacturableBlueprintsAsync(CancellationToken.None);
+            var candidates = catalog
+                .Where(item => MatchesMarketScannerFilter(item, SelectedMarketScannerFilter.Filter))
+                .OrderBy(item => item.ProductName)
+                .ToList();
+
+            if (MarketScannerMaxItems > 0)
+            {
+                candidates = candidates.Take(MarketScannerMaxItems).ToList();
+            }
+
+            var rows = new List<MarketScannerResultRow>();
+            for (var index = 0; index < candidates.Count; index++)
+            {
+                var item = candidates[index];
+                MarketScannerProgressText = $"{index + 1:N0} / {candidates.Count:N0}: {item.ProductName}";
+
+                try
+                {
+                    var scanResult = await calculator.CalculateAsync(CreateManufacturingRequest(item.BlueprintId), CancellationToken.None);
+                    rows.Add(new MarketScannerResultRow(
+                        item.BlueprintId.Value,
+                        item.ProductTypeId.Value,
+                        item.ProductName,
+                        item.BlueprintName,
+                        ClassifyMarketScannerItem(item),
+                        item.ActivityType == BlueprintActivityType.Reaction ? "Reaction" : "Manufacturing",
+                        scanResult.OutputQuantity,
+                        scanResult.MaterialCost,
+                        scanResult.JobCost,
+                        scanResult.TotalCost,
+                        scanResult.EstimatedRevenue,
+                        scanResult.Profit,
+                        scanResult.ProfitPercent,
+                        scanResult.IskPerHour,
+                        scanResult.TotalProductionTime,
+                        scanResult.Warnings.Count));
+                }
+                catch (Exception ex) when (ex is InvalidOperationException or ArgumentOutOfRangeException or HttpRequestException or JsonException or TaskCanceledException)
+                {
+                    rows.Add(new MarketScannerResultRow(
+                        item.BlueprintId.Value,
+                        item.ProductTypeId.Value,
+                        item.ProductName,
+                        item.BlueprintName,
+                        ClassifyMarketScannerItem(item),
+                        item.ActivityType == BlueprintActivityType.Reaction ? "Reaction" : "Manufacturing",
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        TimeSpan.Zero,
+                        1,
+                        ex.Message));
+                }
+            }
+
+            var orderedRows = rows
+                .OrderByDescending(row => row.Profit)
+                .ThenByDescending(row => row.IskPerHour)
+                .ToList();
+
+            marketScannerCache[cacheKey] = new MarketScannerCacheEntry(DateTimeOffset.UtcNow, orderedRows);
+            ApplyMarketScannerResults(orderedRows);
+            MarketScannerStatusText = $"Scanned {orderedRows.Count:N0} items. Results are cached for 5 minutes.";
+            StatusText = "Market scan complete";
+        }
+        finally
+        {
+            IsMarketScannerBusy = false;
+            IsBusy = false;
+            RaiseCommandStates();
+        }
+    }
+
+    private void ApplyMarketScannerResults(IReadOnlyList<MarketScannerResultRow> rows)
+    {
+        MarketScannerResults.Clear();
+        foreach (var row in rows)
+        {
+            MarketScannerResults.Add(row);
+        }
+    }
+
+    private string BuildMarketScannerCacheKey()
+    {
+        return string.Join(
+            "|",
+            SelectedMarketScannerFilter.Filter,
+            MarketScannerMaxItems,
+            Runs,
+            MaterialEfficiency,
+            TimeEfficiency,
+            AdditionalCosts,
+            EnableBuildBuy,
+            SelectedBuildBuyDepth.Depth,
+            MaxBuildBuyDepth,
+            SelectedMaterialMarket.LocationId,
+            SelectedProductMarket.LocationId,
+            SelectedMaterialPriceStrategy.Selection,
+            SelectedProductPriceStrategy.Selection,
+            SelectedFinalProductFacility.Id,
+            SelectedComponentFacility.Id,
+            SelectedReactionFacility.Id);
+    }
+
+    private static bool MatchesMarketScannerFilter(BlueprintCatalogItem item, MarketScannerFilter filter)
+    {
+        return filter switch
+        {
+            MarketScannerFilter.All => true,
+            MarketScannerFilter.Reactions => item.ActivityType == BlueprintActivityType.Reaction,
+            MarketScannerFilter.Components => item.ActivityType == BlueprintActivityType.Manufacturing && ClassifyMarketScannerItem(item) == "Component",
+            MarketScannerFilter.Ships => item.ProductCategoryId == 6,
+            MarketScannerFilter.Modules => item.ProductCategoryId == 7,
+            MarketScannerFilter.DronesAndFighters => item.ProductCategoryId is 18 or 87,
+            MarketScannerFilter.Charges => item.ProductCategoryId == 8,
+            MarketScannerFilter.Structures => item.ProductCategoryId is 22 or 23 or 65,
+            MarketScannerFilter.Other => ClassifyMarketScannerItem(item) == "Other",
+            _ => true
+        };
+    }
+
+    private static string ClassifyMarketScannerItem(BlueprintCatalogItem item)
+    {
+        if (item.ActivityType == BlueprintActivityType.Reaction)
+        {
+            return "Reaction";
+        }
+
+        if (item.ProductCategoryId == 6)
+        {
+            return "Ship";
+        }
+
+        if (item.ProductCategoryId == 7)
+        {
+            return "Module";
+        }
+
+        if (item.ProductCategoryId is 18 or 87)
+        {
+            return "Drone / Fighter";
+        }
+
+        if (item.ProductCategoryId == 8)
+        {
+            return "Charge";
+        }
+
+        if (item.ProductCategoryId is 22 or 23 or 65)
+        {
+            return "Structure";
+        }
+
+        if (item.ProductName.Contains("component", StringComparison.OrdinalIgnoreCase)
+            || item.BlueprintName.Contains("component", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Component";
+        }
+
+        return "Other";
     }
 
     private void CopyShoppingList()
@@ -1714,6 +1981,11 @@ public sealed class MainWindowViewModel : ObservableObject
         if (CopyShoppingListCommand is RelayCommand copyCommand)
         {
             copyCommand.RaiseCanExecuteChanged();
+        }
+
+        if (RunMarketScannerCommand is AsyncRelayCommand scannerCommand)
+        {
+            scannerCommand.RaiseCanExecuteChanged();
         }
 
         RaiseProductionLedgerCommandStates();
@@ -2463,6 +2735,21 @@ public sealed class MainWindowViewModel : ObservableObject
 
     public sealed record ProductionJobFilterOption(string Name, ProductionJobFilter Filter);
 
+    public enum MarketScannerFilter
+    {
+        All,
+        Reactions,
+        Components,
+        Ships,
+        Modules,
+        DronesAndFighters,
+        Charges,
+        Structures,
+        Other
+    }
+
+    public sealed record MarketScannerFilterOption(string Name, MarketScannerFilter Filter);
+
     public sealed record FacilityStructureOption(string Id, string Name, int RigSlots, FacilityRigSize RigSize);
 
     public sealed record FacilityServiceOption(string Id, string Name, FacilityServiceRole Role);
@@ -2545,6 +2832,31 @@ public sealed class MainWindowViewModel : ObservableObject
         public string OutputText => $"{Result.OutputQuantity:N0} x {ProductName}";
         public string SummaryText => $"{Runs:N0} runs / cost {Result.TotalCost:N2} ISK / profit {Result.Profit:N2} ISK";
     }
+
+    public sealed record MarketScannerResultRow(
+        long BlueprintId,
+        long ProductTypeId,
+        string ProductName,
+        string BlueprintName,
+        string ItemType,
+        string Activity,
+        long OutputQuantity,
+        decimal MaterialCost,
+        decimal JobCost,
+        decimal TotalCost,
+        decimal Revenue,
+        decimal Profit,
+        decimal Margin,
+        decimal IskPerHour,
+        TimeSpan ProductionTime,
+        int WarningCount,
+        string Error = "")
+    {
+        public string ProductionTimeText => FormatDuration(ProductionTime);
+        public string Status => Error.Length > 0 ? Error : WarningCount > 0 ? $"{WarningCount:N0} warnings" : "OK";
+    }
+
+    private sealed record MarketScannerCacheEntry(DateTimeOffset CreatedAt, IReadOnlyList<MarketScannerResultRow> Rows);
 
     private sealed record ProductionJobRequirementSource(
         Guid SourceEntryId,

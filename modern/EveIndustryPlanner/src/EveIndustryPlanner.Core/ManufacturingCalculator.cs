@@ -203,6 +203,29 @@ public sealed class ManufacturingCalculator(
         List<string> warnings,
         CancellationToken cancellationToken)
     {
+        if (priceSelection == MarketPriceSelection.InstantBuy && priceProvider is IMarketOrderBookProvider orderBookProvider)
+        {
+            var effectivePrice = await orderBookProvider.GetEffectivePriceAsync(material.TypeId, materialPriceProfile, priceSelection, quantity, cancellationToken);
+            if (effectivePrice is not null)
+            {
+                if (!effectivePrice.HasEnoughVolume)
+                {
+                    warnings.Add($"Only {effectivePrice.FilledQuantity:N0} of {quantity:N0} units were available for {material.Name} instant buy pricing.");
+                }
+
+                return new MaterialRequirement
+                {
+                    TypeId = material.TypeId,
+                    Name = material.Name,
+                    Quantity = quantity,
+                    UnitPrice = effectivePrice.UnitPrice,
+                    TotalVolume = quantity * material.Volume,
+                    Category = material.Category,
+                    MissingPrice = false
+                };
+            }
+        }
+
         var price = await priceProvider.GetPriceAsync(material.TypeId, materialPriceProfile, cancellationToken);
         var unitPrice = price?.Select(priceSelection) ?? 0m;
 

@@ -1,6 +1,6 @@
 namespace EveIndustryPlanner.Core;
 
-public sealed class SampleBlueprintRepository : IBlueprintRepository
+public sealed class SampleBlueprintRepository : IBlueprintRepository, IBlueprintCatalogProvider
 {
     private static readonly IReadOnlyList<BlueprintDefinition> Blueprints =
     [
@@ -52,6 +52,23 @@ public sealed class SampleBlueprintRepository : IBlueprintRepository
             .ToList();
 
         return Task.FromResult<IReadOnlyList<BlueprintSearchResult>>(results);
+    }
+
+    public Task<IReadOnlyList<BlueprintCatalogItem>> GetManufacturableBlueprintsAsync(CancellationToken cancellationToken)
+    {
+        var results = Blueprints
+            .Select(bp => new BlueprintCatalogItem(
+                bp.BlueprintId,
+                bp.ProductTypeId,
+                bp.ProductGroupId,
+                bp.ProductCategoryId,
+                bp.BlueprintName,
+                bp.ProductName,
+                bp.TechLevel,
+                bp.ActivityType))
+            .ToList();
+
+        return Task.FromResult<IReadOnlyList<BlueprintCatalogItem>>(results);
     }
 
     public Task<BlueprintDefinition?> GetBlueprintAsync(BlueprintId blueprintId, CancellationToken cancellationToken)

@@ -44,6 +44,16 @@ public sealed record BlueprintSearchResult(
     string ProductName,
     int TechLevel);
 
+public sealed record BlueprintCatalogItem(
+    BlueprintId BlueprintId,
+    TypeId ProductTypeId,
+    int ProductGroupId,
+    int ProductCategoryId,
+    string BlueprintName,
+    string ProductName,
+    int TechLevel,
+    BlueprintActivityType ActivityType);
+
 public sealed record SolarSystemSearchResult(
     long SolarSystemId,
     string Name,
@@ -133,6 +143,15 @@ public sealed class MarketPrice
     {
         return preferred > 0 ? preferred : fallback;
     }
+}
+
+public sealed class EffectiveMarketPrice
+{
+    public decimal UnitPrice { get; init; }
+    public decimal TotalPrice { get; init; }
+    public long FilledQuantity { get; init; }
+    public long RequestedQuantity { get; init; }
+    public bool HasEnoughVolume => FilledQuantity >= RequestedQuantity;
 }
 
 public sealed class PriceProfile

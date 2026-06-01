@@ -7,9 +7,19 @@ public interface IBlueprintRepository
     Task<BlueprintDefinition?> GetBlueprintByProductTypeAsync(TypeId productTypeId, CancellationToken cancellationToken);
 }
 
+public interface IBlueprintCatalogProvider
+{
+    Task<IReadOnlyList<BlueprintCatalogItem>> GetManufacturableBlueprintsAsync(CancellationToken cancellationToken);
+}
+
 public interface IMarketPriceProvider
 {
     Task<MarketPrice?> GetPriceAsync(TypeId typeId, PriceProfile profile, CancellationToken cancellationToken);
+}
+
+public interface IMarketOrderBookProvider
+{
+    Task<EffectiveMarketPrice?> GetEffectivePriceAsync(TypeId typeId, PriceProfile profile, MarketPriceSelection selection, long quantity, CancellationToken cancellationToken);
 }
 
 public interface ISolarSystemRepository
