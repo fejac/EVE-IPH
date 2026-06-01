@@ -539,9 +539,16 @@
                                     </Grid.RowDefinitions>
                                     <DockPanel Margin="0,0,0,8">
                                         <TextBlock Text="Combined Shopping List" FontSize="16" FontWeight="SemiBold" DockPanel.Dock="Left" />
+                                        <Button Content="Use Assets"
+                                                Width="92"
+                                                HorizontalAlignment="Right"
+                                                Command="{Binding UseProductionAssetsCommand}"
+                                                DockPanel.Dock="Right" />
                                         <Button Content="Copy"
                                                 Width="80"
+                                                Margin="0,0,8,0"
                                                 HorizontalAlignment="Right"
+                                                DockPanel.Dock="Right"
                                                 Command="{Binding CopyProductionShoppingListCommand}" />
                                     </DockPanel>
                                     <TextBox Grid.Row="1"
@@ -762,6 +769,104 @@
                                 </UniformGrid>
                             </StackPanel>
                         </ScrollViewer>
+                    </Border>
+                </Grid>
+            </TabItem>
+
+            <TabItem Header="Characters">
+                <Grid Margin="0,10,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="14" />
+                        <ColumnDefinition Width="360" />
+                    </Grid.ColumnDefinitions>
+
+                    <Border Grid.Column="0" Style="{StaticResource PanelBorder}">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+
+                            <DockPanel Margin="0,0,0,10">
+                                <TextBlock Text="Characters"
+                                           FontSize="16"
+                                           FontWeight="SemiBold"
+                                           DockPanel.Dock="Left" />
+                                <StackPanel Orientation="Horizontal"
+                                            HorizontalAlignment="Right">
+                                    <Button Content="Add Character"
+                                            Command="{Binding AddCharacterCommand}"
+                                            Margin="0,0,8,0" />
+                                    <Button Content="Refresh Token"
+                                            Command="{Binding RefreshCharacterTokenCommand}"
+                                            Margin="0,0,8,0" />
+                                    <Button Content="Remove"
+                                            Command="{Binding DeleteCharacterCommand}" />
+                                </StackPanel>
+                            </DockPanel>
+
+                            <DataGrid Grid.Row="1"
+                                      ItemsSource="{Binding CharacterAccounts}"
+                                      SelectedItem="{Binding SelectedCharacterAccount}"
+                                      AutoGenerateColumns="False"
+                                      CanUserAddRows="False"
+                                      IsReadOnly="True"
+                                      GridLinesVisibility="Horizontal"
+                                      HeadersVisibility="Column">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Character" Binding="{Binding CharacterName}" Width="*" />
+                                    <DataGridTextColumn Header="Character ID" Binding="{Binding CharacterId}" Width="130" />
+                                    <DataGridTextColumn Header="Token Expires" Binding="{Binding TokenExpiresText}" Width="150" />
+                                    <DataGridTextColumn Header="Added" Binding="{Binding AddedAtText}" Width="150" />
+                                    <DataGridTextColumn Header="Scopes" Binding="{Binding ScopesPreview}" Width="260" />
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </Grid>
+                    </Border>
+
+                    <Border Grid.Column="2" Style="{StaticResource PanelBorder}">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+
+                            <TextBlock Text="Selected Character"
+                                       FontSize="16"
+                                       FontWeight="SemiBold"
+                                       Margin="0,0,0,10" />
+
+                            <StackPanel Grid.Row="1" Margin="0,0,0,12">
+                                <TextBlock Text="{Binding SelectedCharacterAccount.CharacterName, TargetNullValue=No character selected}"
+                                           FontWeight="SemiBold" />
+                                <TextBlock Text="{Binding SelectedCharacterAccount.CharacterId}"
+                                           Foreground="#526176"
+                                           Margin="0,2,0,8" />
+                                <TextBlock Text="Stored Token Preview" FontSize="12" Foreground="#526176" />
+                                <TextBox Text="{Binding SelectedCharacterTokenText, Mode=OneWay}"
+                                         IsReadOnly="True"
+                                         AcceptsReturn="True"
+                                         FontFamily="Consolas"
+                                         MinHeight="58" />
+                            </StackPanel>
+
+                            <Grid Grid.Row="2">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="*" />
+                                </Grid.RowDefinitions>
+                                <TextBlock Text="Authorized Scopes" FontSize="12" Foreground="#526176" />
+                                <TextBox Grid.Row="1"
+                                         Text="{Binding SelectedCharacterScopesText, Mode=OneWay}"
+                                         IsReadOnly="True"
+                                         AcceptsReturn="True"
+                                         FontFamily="Consolas"
+                                         VerticalScrollBarVisibility="Auto"
+                                         Margin="0,4,0,0" />
+                            </Grid>
+                        </Grid>
                     </Border>
                 </Grid>
             </TabItem>

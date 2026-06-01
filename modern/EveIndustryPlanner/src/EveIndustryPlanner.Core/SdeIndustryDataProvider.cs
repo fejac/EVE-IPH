@@ -1,3 +1,8 @@
+using System.IO.Compression;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using YamlDotNet.Serialization;
 
 namespace EveIndustryPlanner.Core;
@@ -151,6 +156,14 @@ public sealed class SdeIndustryDataProvider(string sdeDirectory) : IBlueprintRep
 
     private static async Task<SdeData> LoadAsync(string sdeDirectory)
     {
+        var signature = BuildSdeSignature(sdeDirectory);
+        var cacheFilePath = GetCacheFilePath(sdeDirectory);
+        var cached = await TryLoadFromCacheAsync(cacheFilePath, signature);
+        if (cached is not null)
+        {
+            return cached;
+        }
+
         var deserializer = new DeserializerBuilder()
             .IgnoreUnmatchedProperties()
             .Build();
@@ -209,8 +222,119 @@ public sealed class SdeIndustryDataProvider(string sdeDirectory) : IBlueprintRep
                     });
         }
 
-        return new SdeData(blueprints, blueprintsByProductTypeId, types, manufacturedTypeIds, solarSystems, DateTimeOffset.UtcNow);
+        var loadedData = new SdeData(blueprints, blueprintsByProductTypeId, types, manufacturedTypeIds, solarSystems, DateTimeOffset.UtcNow);
+        await TrySaveToCacheAsync(cacheFilePath, signature, loadedData);
+        return loadedData;
     }
+
+    private static async Task<SdeData?> TryLoadFromCacheAsync(string cacheFilePath, string signature)
+    {
+        try
+        {
+            if (!File.Exists(cacheFilePath))
+            {
+                return null;
+            }
+
+            await using var fileStream = File.OpenRead(cacheFilePath);
+            await using var gzipStream = new GZipStream(fileStream, CompressionMode.Decompress);
+            var document = await JsonSerializer.DeserializeAsync<SdeCacheDocument>(gzipStream, CacheJsonOptions);
+
+            if (document is null || document.Signature != signature)
+            {
+                return null;
+            }
+
+            return new SdeData(
+                document.Blueprints,
+                document.BlueprintsByProductTypeId,
+                document.Types,
+                document.ManufacturedTypeIds,
+                document.SolarSystems,
+                document.LoadedAt);
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+        catch (InvalidDataException)
+        {
+            return null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    private static async Task TrySaveToCacheAsync(string cacheFilePath, string signature, SdeData data)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(cacheFilePath)!);
+
+            var document = new SdeCacheDocument
+            {
+                Signature = signature,
+                Blueprints = data.Blueprints.ToDictionary(),
+                BlueprintsByProductTypeId = data.BlueprintsByProductTypeId.ToDictionary(),
+                Types = data.Types.ToDictionary(),
+                ManufacturedTypeIds = data.ManufacturedTypeIds.ToHashSet(),
+                SolarSystems = data.SolarSystems.ToDictionary(),
+                LoadedAt = data.LoadedAt
+            };
+
+            await using var fileStream = File.Create(cacheFilePath);
+            await using var gzipStream = new GZipStream(fileStream, CompressionLevel.Fastest);
+            await JsonSerializer.SerializeAsync(gzipStream, document, CacheJsonOptions);
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
+    }
+
+    private static string BuildSdeSignature(string sdeDirectory)
+    {
+        var files = new[]
+        {
+            "blueprints.yaml",
+            "types.yaml",
+            "groups.yaml",
+            "mapSolarSystems.yaml"
+        };
+
+        return string.Join("|", files.Select(fileName =>
+        {
+            var path = Path.Combine(sdeDirectory, fileName);
+            if (!File.Exists(path))
+            {
+                return $"{fileName}:missing";
+            }
+
+            var info = new FileInfo(path);
+            return $"{fileName}:{info.Length}:{info.LastWriteTimeUtc.Ticks}";
+        }));
+    }
+
+    private static string GetCacheFilePath(string sdeDirectory)
+    {
+        var appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(sdeDirectory).ToUpperInvariant()));
+        var hash = Convert.ToHexString(hashBytes)[..16].ToLowerInvariant();
+        return Path.Combine(appData, "EveIndustryPlanner", $"sde-cache-{hash}.json.gz");
+    }
+
+    private static readonly JsonSerializerOptions CacheJsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true
+    };
 
     private sealed record SdeData(
         IReadOnlyDictionary<long, SdeBlueprint> Blueprints,
@@ -228,18 +352,23 @@ public sealed class SdeIndustryDataProvider(string sdeDirectory) : IBlueprintRep
         [YamlMember(Alias = "activities")]
         public SdeActivities Activities { get; init; } = new();
 
+        [JsonIgnore]
         public SdeActivity Activity => Activities.Manufacturing.Products.Count > 0
             ? Activities.Manufacturing
             : Activities.Reaction;
 
+        [JsonIgnore]
         public BlueprintActivityType ActivityType => Activities.Manufacturing.Products.Count > 0
             ? BlueprintActivityType.Manufacturing
             : BlueprintActivityType.Reaction;
 
+        [JsonIgnore]
         public SdeProduct? Product => Activity.Products.FirstOrDefault();
 
+        [JsonIgnore]
         public SdeProduct? ManufacturingProduct => Product;
 
+        [JsonIgnore]
         public IReadOnlyList<SdeMaterial> ManufacturingMaterials => Activity.Materials;
     }
 
@@ -338,5 +467,16 @@ public sealed class SdeIndustryDataProvider(string sdeDirectory) : IBlueprintRep
         public string Name { get; init; } = string.Empty;
         public double SecurityStatus { get; init; }
         public long RegionId { get; init; }
+    }
+
+    private sealed class SdeCacheDocument
+    {
+        public string Signature { get; init; } = string.Empty;
+        public Dictionary<long, SdeBlueprint> Blueprints { get; init; } = [];
+        public Dictionary<long, long> BlueprintsByProductTypeId { get; init; } = [];
+        public Dictionary<long, SdeTypeInfo> Types { get; init; } = [];
+        public HashSet<long> ManufacturedTypeIds { get; init; } = [];
+        public Dictionary<long, SdeSolarSystemInfo> SolarSystems { get; init; } = [];
+        public DateTimeOffset LoadedAt { get; init; }
     }
 }

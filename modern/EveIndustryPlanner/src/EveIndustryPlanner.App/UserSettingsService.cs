@@ -68,6 +68,8 @@ public sealed class UserSettings
         SavedFacilityProfile.None
     ];
 
+    public List<SavedCharacterAccount> CharacterAccounts { get; init; } = [];
+
     public Guid FinalProductFacilityId { get; init; } = SavedFacilityProfile.NoneId;
     public Guid ComponentFacilityId { get; init; } = SavedFacilityProfile.NoneId;
     public Guid ReactionFacilityId { get; init; } = SavedFacilityProfile.NoneId;
@@ -78,6 +80,19 @@ public sealed class UserSettings
     public bool EnableBuildBuy { get; init; }
     public BuildBuyDepth BuildBuyDepth { get; init; } = BuildBuyDepth.DirectMaterialsOnly;
     public int MaxBuildBuyDepth { get; init; } = 6;
+}
+
+public sealed class SavedCharacterAccount
+{
+    public long CharacterId { get; init; }
+    public string CharacterName { get; init; } = string.Empty;
+    public string AccessToken { get; init; } = string.Empty;
+    public string RefreshToken { get; init; } = string.Empty;
+    public string TokenType { get; init; } = "Bearer";
+    public List<string> Scopes { get; init; } = [];
+    public DateTimeOffset AccessTokenExpiresAt { get; init; }
+    public DateTimeOffset AddedAt { get; init; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset UpdatedAt { get; init; } = DateTimeOffset.UtcNow;
 }
 
 public sealed class SavedFacilityProfile

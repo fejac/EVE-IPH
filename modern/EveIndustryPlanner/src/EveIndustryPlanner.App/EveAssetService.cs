@@ -1,0 +1,553 @@
+using System.IO;
+using System.Net;
+using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+
+namespace EveIndustryPlanner.App;
+
+public sealed class EveAssetService(EveSsoCharacterAuthService authService)
+{
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        WriteIndented = true
+    };
+
+    private readonly HttpClient httpClient = new();
+
+    public async Task<IReadOnlyList<CachedEveAsset>> LoadAllCharacterAssetsAsync(
+        IReadOnlyList<SavedCharacterAccount> accounts,
+        bool refresh,
+        CancellationToken cancellationToken = default)
+    {
+        var cacheFilePath = GetAssetCacheFilePath();
+        if (!refresh)
+        {
+            var cached = LoadCachedAssets(cacheFilePath);
+            if (cached.Count > 0)
+            {
+                if (cached.Any(asset => asset.LocationName.StartsWith("Location ", StringComparison.OrdinalIgnoreCase)
+                    || asset.LocationName.StartsWith("Unknown Location ", StringComparison.OrdinalIgnoreCase)
+                    || asset.LocationName.StartsWith("item ", StringComparison.OrdinalIgnoreCase)
+                    || asset.LocationName.StartsWith("other ", StringComparison.OrdinalIgnoreCase)
+                    || string.IsNullOrWhiteSpace(asset.RootLocationName)
+                    || string.IsNullOrWhiteSpace(asset.SolarSystemName)))
+                {
+                    await PopulateNamesAsync(cached, accounts, cancellationToken).ConfigureAwait(false);
+                    SaveCachedAssets(cacheFilePath, cached);
+                }
+
+                return cached;
+            }
+        }
+
+        var assets = new List<CachedEveAsset>();
+        foreach (var account in accounts.Where(account => account.Scopes.Contains("esi-assets.read_assets.v1", StringComparer.Ordinal)))
+        {
+            var tokenAccount = account;
+            var characterAssets = await FetchCharacterAssetsAsync(tokenAccount, cancellationToken).ConfigureAwait(false);
+
+            assets.AddRange(characterAssets.Select(asset => new CachedEveAsset
+            {
+                CharacterId = account.CharacterId,
+                CharacterName = account.CharacterName,
+                ItemId = asset.ItemId,
+                TypeId = asset.TypeId,
+                LocationId = asset.LocationId,
+                LocationFlag = asset.LocationFlag,
+                LocationType = asset.LocationType,
+                Quantity = asset.Quantity,
+                IsSingleton = asset.IsSingleton,
+                IsBlueprintCopy = asset.IsBlueprintCopy,
+                CachedAt = DateTimeOffset.UtcNow
+            }));
+        }
+
+        await PopulateNamesAsync(assets, accounts, cancellationToken).ConfigureAwait(false);
+        SaveCachedAssets(cacheFilePath, assets);
+        return assets;
+    }
+
+    private async Task<IReadOnlyList<EsiAssetDto>> FetchCharacterAssetsAsync(SavedCharacterAccount account, CancellationToken cancellationToken)
+    {
+        var assets = new List<EsiAssetDto>();
+        var accessToken = account.AccessToken;
+        var page = 1;
+        var pages = 1;
+
+        do
+        {
+            using var request = CreateAssetRequest(account.CharacterId, accessToken, page);
+            using var response = await httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+
+            if (response.StatusCode == HttpStatusCode.Unauthorized)
+            {
+                var refreshed = await authService.RefreshAccessTokenAsync(account, cancellationToken).ConfigureAwait(false);
+                accessToken = refreshed.AccessToken;
+                using var retryRequest = CreateAssetRequest(account.CharacterId, accessToken, page);
+                using var retryResponse = await httpClient.SendAsync(retryRequest, cancellationToken).ConfigureAwait(false);
+                retryResponse.EnsureSuccessStatusCode();
+                pages = GetPageCount(retryResponse);
+                assets.AddRange(await ReadAssetsAsync(retryResponse, cancellationToken).ConfigureAwait(false));
+            }
+            else
+            {
+                response.EnsureSuccessStatusCode();
+                pages = GetPageCount(response);
+                assets.AddRange(await ReadAssetsAsync(response, cancellationToken).ConfigureAwait(false));
+            }
+
+            page++;
+        }
+        while (page <= pages);
+
+        return assets;
+    }
+
+    private static HttpRequestMessage CreateAssetRequest(long characterId, string accessToken, int page)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Get, $"https://esi.evetech.net/latest/characters/{characterId}/assets/?datasource=tranquility&page={page}");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+        return request;
+    }
+
+    private static int GetPageCount(HttpResponseMessage response)
+    {
+        return response.Headers.TryGetValues("X-Pages", out var values)
+            && int.TryParse(values.FirstOrDefault(), out var pages)
+            ? Math.Max(1, pages)
+            : 1;
+    }
+
+    private static async Task<IReadOnlyList<EsiAssetDto>> ReadAssetsAsync(HttpResponseMessage response, CancellationToken cancellationToken)
+    {
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+        return await JsonSerializer.DeserializeAsync<List<EsiAssetDto>>(stream, JsonOptions, cancellationToken).ConfigureAwait(false) ?? [];
+    }
+
+    private async Task PopulateNamesAsync(
+        List<CachedEveAsset> assets,
+        IReadOnlyList<SavedCharacterAccount> accounts,
+        CancellationToken cancellationToken)
+    {
+        var typeIds = assets.Select(asset => asset.TypeId).Distinct().ToList();
+        var assetItemIds = assets.Select(asset => asset.ItemId).ToHashSet();
+        var publicLocationIds = assets
+            .Where(asset => asset.LocationId > 0
+                && asset.LocationId < 1_000_000_000_000
+                && !assetItemIds.Contains(asset.LocationId))
+            .Select(asset => asset.LocationId)
+            .Distinct()
+            .ToList();
+
+        var names = await FetchUniverseNamesAsync(typeIds.Concat(publicLocationIds).Distinct().ToList(), cancellationToken).ConfigureAwait(false);
+        var assetLocationNames = await FetchAssetLocationNamesAsync(assets, accounts, cancellationToken).ConfigureAwait(false);
+        var structureInfos = await FetchStructureInfosAsync(assets, accounts, cancellationToken).ConfigureAwait(false);
+        var stationInfos = await FetchStationInfosAsync(assets, cancellationToken).ConfigureAwait(false);
+        var solarSystemNames = await FetchUniverseNamesAsync(
+            structureInfos.Values.Select(info => info.SolarSystemId)
+                .Concat(stationInfos.Values.Select(info => info.SolarSystemId))
+                .Where(id => id > 0)
+                .Distinct()
+                .ToList(),
+            cancellationToken).ConfigureAwait(false);
+
+        foreach (var asset in assets)
+        {
+            asset.TypeName = names.TryGetValue(asset.TypeId, out var typeName) ? typeName : $"Type {asset.TypeId}";
+            asset.ItemName = assetLocationNames.TryGetValue((asset.CharacterId, asset.ItemId), out var itemName)
+                ? itemName
+                : asset.TypeName;
+            asset.LocationName =
+                assetLocationNames.TryGetValue((asset.CharacterId, asset.LocationId), out var assetLocationName)
+                    ? assetLocationName
+                    : structureInfos.TryGetValue(asset.LocationId, out var structureInfo)
+                        ? structureInfo.Name
+                        : stationInfos.TryGetValue(asset.LocationId, out var stationInfo)
+                            ? stationInfo.Name
+                        : names.TryGetValue(asset.LocationId, out var locationName)
+                            ? locationName
+                            : FormatUnknownLocation(asset.LocationId, asset.LocationType);
+        }
+
+        var assetsByItemId = assets.ToDictionary(asset => asset.ItemId);
+        foreach (var asset in assets)
+        {
+            var rootLocationId = FindRootLocationId(asset, assetsByItemId);
+            asset.RootLocationId = rootLocationId;
+            asset.RootLocationName =
+                structureInfos.TryGetValue(rootLocationId, out var structureInfo)
+                    ? structureInfo.Name
+                    : stationInfos.TryGetValue(rootLocationId, out var stationInfo)
+                        ? stationInfo.Name
+                        : names.TryGetValue(rootLocationId, out var rootName)
+                            ? rootName
+                            : FormatUnknownLocation(rootLocationId, asset.LocationType);
+
+            var solarSystemId =
+                structureInfos.TryGetValue(rootLocationId, out structureInfo)
+                    ? structureInfo.SolarSystemId
+                    : stationInfos.TryGetValue(rootLocationId, out stationInfo)
+                        ? stationInfo.SolarSystemId
+                        : 0;
+
+            asset.SolarSystemId = solarSystemId;
+            asset.SolarSystemName = solarSystemId > 0 && solarSystemNames.TryGetValue(solarSystemId, out var solarSystemName)
+                ? solarSystemName
+                : "Unknown System";
+        }
+    }
+
+    private static long FindRootLocationId(CachedEveAsset asset, IReadOnlyDictionary<long, CachedEveAsset> assetsByItemId)
+    {
+        var locationId = asset.LocationId;
+        var guard = 0;
+        while (assetsByItemId.TryGetValue(locationId, out var parentAsset) && guard < 64)
+        {
+            locationId = parentAsset.LocationId;
+            guard++;
+        }
+
+        return locationId;
+    }
+
+    private async Task<Dictionary<(long CharacterId, long ItemId), string>> FetchAssetLocationNamesAsync(
+        IReadOnlyList<CachedEveAsset> assets,
+        IReadOnlyList<SavedCharacterAccount> accounts,
+        CancellationToken cancellationToken)
+    {
+        var names = new Dictionary<(long CharacterId, long ItemId), string>();
+        var accountsByCharacterId = accounts.ToDictionary(account => account.CharacterId, account => account);
+
+        foreach (var characterGroup in assets.GroupBy(asset => asset.CharacterId))
+        {
+            if (!accountsByCharacterId.TryGetValue(characterGroup.Key, out var account))
+            {
+                continue;
+            }
+
+            var assetItemIds = characterGroup.Select(asset => asset.ItemId).ToHashSet();
+            var locationItemIds = characterGroup
+                .Where(asset => assetItemIds.Contains(asset.LocationId))
+                .Select(asset => asset.LocationId)
+                .Distinct()
+                .ToList();
+
+            foreach (var chunk in locationItemIds.Chunk(1000))
+            {
+                using var response = await SendAssetNamesRequestAsync(account, chunk, cancellationToken).ConfigureAwait(false);
+                if (!response.IsSuccessStatusCode)
+                {
+                    continue;
+                }
+
+                await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+                var rows = await JsonSerializer.DeserializeAsync<List<EsiAssetNameDto>>(stream, JsonOptions, cancellationToken).ConfigureAwait(false) ?? [];
+                foreach (var row in rows)
+                {
+                    names[(account.CharacterId, row.ItemId)] = row.Name;
+                }
+            }
+        }
+
+        return names;
+    }
+
+    private async Task<HttpResponseMessage> SendAssetNamesRequestAsync(
+        SavedCharacterAccount account,
+        IEnumerable<long> itemIds,
+        CancellationToken cancellationToken)
+    {
+        var payload = JsonSerializer.Serialize(itemIds);
+        var response = await SendAssetNamesRequestAsync(account.CharacterId, account.AccessToken, payload, cancellationToken).ConfigureAwait(false);
+        if (response.StatusCode != HttpStatusCode.Unauthorized)
+        {
+            return response;
+        }
+
+        response.Dispose();
+        var refreshed = await authService.RefreshAccessTokenAsync(account, cancellationToken).ConfigureAwait(false);
+        return await SendAssetNamesRequestAsync(account.CharacterId, refreshed.AccessToken, payload, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<HttpResponseMessage> SendAssetNamesRequestAsync(
+        long characterId,
+        string accessToken,
+        string payload,
+        CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(
+            HttpMethod.Post,
+            $"https://esi.evetech.net/latest/characters/{characterId}/assets/names/?datasource=tranquility");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+        request.Content = new StringContent(payload, Encoding.UTF8, "application/json");
+        return await httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<Dictionary<long, StructureInfo>> FetchStructureInfosAsync(
+        IReadOnlyList<CachedEveAsset> assets,
+        IReadOnlyList<SavedCharacterAccount> accounts,
+        CancellationToken cancellationToken)
+    {
+        var infos = new Dictionary<long, StructureInfo>();
+        var assetItemIds = assets.Select(asset => asset.ItemId).ToHashSet();
+        var structureIds = assets
+            .Where(asset => asset.LocationId >= 1_000_000_000_000 || (asset.LocationId > 70000000 && !assetItemIds.Contains(asset.LocationId)))
+            .Select(asset => asset.LocationId)
+            .Distinct()
+            .ToList();
+
+        foreach (var structureId in structureIds)
+        {
+            foreach (var account in accounts.Where(account => account.Scopes.Contains("esi-universe.read_structures.v1", StringComparer.Ordinal)))
+            {
+                using var response = await SendStructureRequestAsync(account, structureId, cancellationToken).ConfigureAwait(false);
+                if (!response.IsSuccessStatusCode)
+                {
+                    continue;
+                }
+
+                await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+                var structure = await JsonSerializer.DeserializeAsync<EsiStructureDto>(stream, JsonOptions, cancellationToken).ConfigureAwait(false);
+                if (structure is not null && !string.IsNullOrWhiteSpace(structure.Name))
+                {
+                    infos[structureId] = new StructureInfo(structure.Name, structure.SolarSystemId);
+                    break;
+                }
+            }
+        }
+
+        return infos;
+    }
+
+    private async Task<Dictionary<long, StationInfo>> FetchStationInfosAsync(
+        IReadOnlyList<CachedEveAsset> assets,
+        CancellationToken cancellationToken)
+    {
+        var infos = new Dictionary<long, StationInfo>();
+        var stationIds = assets
+            .Where(asset => asset.LocationId >= 60000000 && asset.LocationId < 70000000)
+            .Select(asset => asset.LocationId)
+            .Distinct()
+            .ToList();
+
+        foreach (var stationId in stationIds)
+        {
+            using var response = await httpClient.GetAsync(
+                $"https://esi.evetech.net/latest/universe/stations/{stationId}/?datasource=tranquility",
+                cancellationToken).ConfigureAwait(false);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                continue;
+            }
+
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+            var station = await JsonSerializer.DeserializeAsync<EsiStationDto>(stream, JsonOptions, cancellationToken).ConfigureAwait(false);
+            if (station is not null && !string.IsNullOrWhiteSpace(station.Name))
+            {
+                infos[stationId] = new StationInfo(station.Name, station.SolarSystemId);
+            }
+        }
+
+        return infos;
+    }
+
+    private async Task<HttpResponseMessage> SendStructureRequestAsync(
+        SavedCharacterAccount account,
+        long structureId,
+        CancellationToken cancellationToken)
+    {
+        var response = await SendStructureRequestAsync(structureId, account.AccessToken, cancellationToken).ConfigureAwait(false);
+        if (response.StatusCode != HttpStatusCode.Unauthorized)
+        {
+            return response;
+        }
+
+        response.Dispose();
+        var refreshed = await authService.RefreshAccessTokenAsync(account, cancellationToken).ConfigureAwait(false);
+        return await SendStructureRequestAsync(structureId, refreshed.AccessToken, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<HttpResponseMessage> SendStructureRequestAsync(
+        long structureId,
+        string accessToken,
+        CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(
+            HttpMethod.Get,
+            $"https://esi.evetech.net/latest/universe/structures/{structureId}/?datasource=tranquility");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+        return await httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static string FormatUnknownLocation(long locationId, string locationType)
+    {
+        return string.IsNullOrWhiteSpace(locationType)
+            ? $"Unknown Location {locationId}"
+            : $"{locationType} {locationId}";
+    }
+
+    private async Task<Dictionary<long, string>> FetchUniverseNamesAsync(IReadOnlyList<long> ids, CancellationToken cancellationToken)
+    {
+        var names = new Dictionary<long, string>();
+        foreach (var chunk in ids.Chunk(1000))
+        {
+            var json = JsonSerializer.Serialize(chunk);
+            using var response = await httpClient.PostAsync(
+                "https://esi.evetech.net/latest/universe/names/?datasource=tranquility",
+                new StringContent(json, Encoding.UTF8, "application/json"),
+                cancellationToken).ConfigureAwait(false);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                continue;
+            }
+
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+            var rows = await JsonSerializer.DeserializeAsync<List<EsiUniverseNameDto>>(stream, JsonOptions, cancellationToken).ConfigureAwait(false) ?? [];
+            foreach (var row in rows)
+            {
+                names[row.Id] = row.Name;
+            }
+        }
+
+        return names;
+    }
+
+    private static List<CachedEveAsset> LoadCachedAssets(string cacheFilePath)
+    {
+        try
+        {
+            if (!File.Exists(cacheFilePath))
+            {
+                return [];
+            }
+
+            using var stream = File.OpenRead(cacheFilePath);
+            return JsonSerializer.Deserialize<List<CachedEveAsset>>(stream, JsonOptions) ?? [];
+        }
+        catch (IOException)
+        {
+            return [];
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
+    }
+
+    private static void SaveCachedAssets(string cacheFilePath, IReadOnlyList<CachedEveAsset> assets)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(cacheFilePath)!);
+            using var stream = File.Create(cacheFilePath);
+            JsonSerializer.Serialize(stream, assets, JsonOptions);
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
+    }
+
+    private static string GetAssetCacheFilePath()
+    {
+        var appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        return Path.Combine(appData, "EveIndustryPlanner", "character-assets.json");
+    }
+
+    private sealed class EsiAssetDto
+    {
+        [JsonPropertyName("item_id")]
+        public long ItemId { get; init; }
+
+        [JsonPropertyName("type_id")]
+        public long TypeId { get; init; }
+
+        [JsonPropertyName("location_id")]
+        public long LocationId { get; init; }
+
+        [JsonPropertyName("location_flag")]
+        public string LocationFlag { get; init; } = string.Empty;
+
+        [JsonPropertyName("location_type")]
+        public string LocationType { get; init; } = string.Empty;
+
+        [JsonPropertyName("quantity")]
+        public long Quantity { get; init; } = 1;
+
+        [JsonPropertyName("is_singleton")]
+        public bool IsSingleton { get; init; }
+
+        [JsonPropertyName("is_blueprint_copy")]
+        public bool IsBlueprintCopy { get; init; }
+    }
+
+    private sealed class EsiUniverseNameDto
+    {
+        [JsonPropertyName("id")]
+        public long Id { get; init; }
+
+        [JsonPropertyName("name")]
+        public string Name { get; init; } = string.Empty;
+    }
+
+    private sealed class EsiAssetNameDto
+    {
+        [JsonPropertyName("item_id")]
+        public long ItemId { get; init; }
+
+        [JsonPropertyName("name")]
+        public string Name { get; init; } = string.Empty;
+    }
+
+    private sealed class EsiStructureDto
+    {
+        [JsonPropertyName("name")]
+        public string Name { get; init; } = string.Empty;
+
+        [JsonPropertyName("solar_system_id")]
+        public long SolarSystemId { get; init; }
+    }
+
+    private sealed class EsiStationDto
+    {
+        [JsonPropertyName("name")]
+        public string Name { get; init; } = string.Empty;
+
+        [JsonPropertyName("system_id")]
+        public long SolarSystemId { get; init; }
+    }
+
+    private sealed record StructureInfo(string Name, long SolarSystemId);
+
+    private sealed record StationInfo(string Name, long SolarSystemId);
+}
+
+public sealed class CachedEveAsset
+{
+    public long CharacterId { get; init; }
+    public string CharacterName { get; init; } = string.Empty;
+    public long ItemId { get; init; }
+    public string ItemName { get; set; } = string.Empty;
+    public long TypeId { get; init; }
+    public string TypeName { get; set; } = string.Empty;
+    public long LocationId { get; init; }
+    public string LocationName { get; set; } = string.Empty;
+    public long RootLocationId { get; set; }
+    public string RootLocationName { get; set; } = string.Empty;
+    public long SolarSystemId { get; set; }
+    public string SolarSystemName { get; set; } = string.Empty;
+    public string LocationFlag { get; init; } = string.Empty;
+    public string LocationType { get; init; } = string.Empty;
+    public long Quantity { get; init; }
+    public bool IsSingleton { get; init; }
+    public bool IsBlueprintCopy { get; init; }
+    public DateTimeOffset CachedAt { get; init; }
+}

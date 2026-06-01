@@ -18,6 +18,8 @@ public sealed class MainWindowViewModel : ObservableObject
     private readonly IManufacturingCalculator calculator;
     private readonly IShoppingListService shoppingListService;
     private readonly UserSettingsService userSettingsService;
+    private readonly EveSsoCharacterAuthService characterAuthService = new();
+    private readonly EveAssetService assetService;
     private readonly List<FacilityRigOption> allFacilityRigs = [];
 
     private string searchText = string.Empty;
@@ -70,6 +72,7 @@ public sealed class MainWindowViewModel : ObservableObject
     private ManufacturingResult? result;
     private ShoppingList? shoppingList;
     private ShoppingList productionLedgerShoppingList = new();
+    private readonly Dictionary<TypeId, long> productionLedgerAssetDeductions = new();
     private ProductionLedgerEntry? selectedProductionLedgerEntry;
     private Dictionary<string, ProductionJobCompletionState> productionJobCompletionStates = new(StringComparer.Ordinal);
     private ProductionPlannerScopeOption selectedProductionPlannerScope;
@@ -78,12 +81,39 @@ public sealed class MainWindowViewModel : ObservableObject
     private decimal maxReactionJobHours = 24m;
     private int maxParallelManufacturingJobs = 10;
     private int maxParallelReactionJobs = 5;
+    private CharacterAccountOption? selectedCharacterAccount;
 
     private static readonly JsonSerializerOptions LedgerJsonOptions = new()
     {
         PropertyNameCaseInsensitive = true,
         WriteIndented = true
     };
+
+    private static readonly IReadOnlyList<string> DefaultCharacterScopes =
+    [
+        "esi-skills.read_skills.v1",
+        "esi-universe.read_structures.v1",
+        "esi-markets.structure_markets.v1",
+        "esi-characters.read_standings.v1",
+        "esi-industry.read_character_jobs.v1",
+        "esi-characters.read_agents_research.v1",
+        "esi-assets.read_assets.v1",
+        "esi-characters.read_blueprints.v1",
+        "esi-planets.manage_planets.v1",
+        "esi-corporations.read_corporation_membership.v1",
+        "esi-industry.read_corporation_jobs.v1",
+        "esi-assets.read_corporation_assets.v1",
+        "esi-corporations.read_blueprints.v1",
+        "esi-wallet.read_corporation_wallets.v1",
+        "esi-markets.read_corporation_orders.v1",
+        "esi-corporations.read_divisions.v1",
+        "esi-location.read_ship_type.v1",
+        "esi-location.read_location.v1",
+        "esi-characters.read_loyalty.v1",
+        "esi-wallet.read_character_wallet.v1",
+        "esi-markets.read_character_orders.v1",
+        "esi-ui.open_window.v1"
+    ];
 
     public MainWindowViewModel()
         : this(CreateDefaultServices())
@@ -112,6 +142,7 @@ public sealed class MainWindowViewModel : ObservableObject
         this.calculator = calculator;
         this.shoppingListService = shoppingListService;
         this.userSettingsService = userSettingsService ?? new UserSettingsService(GetSettingsFilePath());
+        assetService = new EveAssetService(characterAuthService);
 
         selectedFacilityStructure = FacilityStructures.First(option => option.Id == "raitaru");
         selectedFacilityService = CostIndexActivities.First(option => option.Role == FacilityServiceRole.Manufacturing);
@@ -129,6 +160,7 @@ public sealed class MainWindowViewModel : ObservableObject
         enableBuildBuy = settings.EnableBuildBuy;
         maxBuildBuyDepth = Math.Clamp(settings.MaxBuildBuyDepth, 0, 20);
         LoadFacilityProfiles(settings);
+        LoadCharacterAccounts(settings);
         selectedFinalProductFacility = FindFacility(settings.FinalProductFacilityId);
         selectedComponentFacility = FindFacility(settings.ComponentFacilityId);
         selectedReactionFacility = FindFacility(settings.ReactionFacilityId);
@@ -140,6 +172,7 @@ public sealed class MainWindowViewModel : ObservableObject
         RemoveProductionEntryCommand = new RelayCommand(RemoveSelectedProductionEntry, () => SelectedProductionLedgerEntry is not null);
         ClearProductionLedgerCommand = new RelayCommand(ClearProductionLedger, () => ProductionLedgerEntries.Count > 0);
         CopyProductionShoppingListCommand = new RelayCommand(CopyProductionShoppingList, () => ProductionLedgerShoppingListText.Length > 0);
+        UseProductionAssetsCommand = new RelayCommand(UseProductionAssets, () => ProductionLedgerEntries.Count > 0 && CharacterAccounts.Count > 0);
         SaveProductionLedgerCommand = new RelayCommand(SaveProductionLedger, () => ProductionLedgerEntries.Count > 0);
         LoadProductionLedgerCommand = new RelayCommand(LoadProductionLedger);
         RecalculateProductionPlanCommand = new RelayCommand(RefreshProductionJobPlan, () => ProductionLedgerEntries.Count > 0);
@@ -148,6 +181,9 @@ public sealed class MainWindowViewModel : ObservableObject
         DeleteFacilityCommand = new RelayCommand(DeleteFacility, () => CanDeleteSelectedFacility);
         SearchSolarSystemsCommand = new AsyncRelayCommand(SearchSolarSystemsAsync);
         RefreshCostIndexCommand = new AsyncRelayCommand(RefreshFacilityCostIndexAsync);
+        AddCharacterCommand = new AsyncRelayCommand(AddCharacterAsync, () => !IsBusy);
+        RefreshCharacterTokenCommand = new AsyncRelayCommand(RefreshSelectedCharacterTokenAsync, () => SelectedCharacterAccount is not null && !IsBusy);
+        DeleteCharacterCommand = new RelayCommand(DeleteSelectedCharacter, () => SelectedCharacterAccount is not null);
         _ = SearchAsync();
         _ = SearchSolarSystemsAsync();
     }
@@ -165,6 +201,8 @@ public sealed class MainWindowViewModel : ObservableObject
     public ObservableCollection<FacilityOption> FacilityProfiles { get; } = [];
 
     public ObservableCollection<SolarSystemOption> SolarSystemResults { get; } = [];
+
+    public ObservableCollection<CharacterAccountOption> CharacterAccounts { get; } = [];
 
     private static FacilityRigOption EmptyRigOption { get; } =
         new(FacilityFittingCalculator.NoneRigId, "Empty Slot", FacilityRigSize.None, FacilityServiceRole.Manufacturing, string.Empty);
@@ -255,6 +293,8 @@ public sealed class MainWindowViewModel : ObservableObject
 
     public ICommand CopyProductionShoppingListCommand { get; }
 
+    public ICommand UseProductionAssetsCommand { get; }
+
     public ICommand SaveProductionLedgerCommand { get; }
 
     public ICommand LoadProductionLedgerCommand { get; }
@@ -271,10 +311,16 @@ public sealed class MainWindowViewModel : ObservableObject
 
     public ICommand RefreshCostIndexCommand { get; }
 
+    public ICommand AddCharacterCommand { get; }
+
+    public ICommand RefreshCharacterTokenCommand { get; }
+
+    public ICommand DeleteCharacterCommand { get; }
+
     public int SelectedWorkspaceTab
     {
         get => selectedWorkspaceTab;
-        set => SetProperty(ref selectedWorkspaceTab, Math.Clamp(value, 0, 1));
+        set => SetProperty(ref selectedWorkspaceTab, Math.Clamp(value, 0, 2));
     }
 
     public string SearchText
@@ -787,6 +833,31 @@ public sealed class MainWindowViewModel : ObservableObject
         private set => SetProperty(ref statusText, value);
     }
 
+    public CharacterAccountOption? SelectedCharacterAccount
+    {
+        get => selectedCharacterAccount;
+        set
+        {
+            if (SetProperty(ref selectedCharacterAccount, value))
+            {
+                OnPropertyChanged(nameof(SelectedCharacterScopesText));
+                OnPropertyChanged(nameof(SelectedCharacterTokenText));
+                RaiseCharacterCommandStates();
+            }
+        }
+    }
+
+    public string SelectedCharacterScopesText =>
+        SelectedCharacterAccount is null
+            ? "No character selected."
+            : string.Join(Environment.NewLine, SelectedCharacterAccount.Scopes.OrderBy(scope => scope, StringComparer.Ordinal));
+
+    public string SelectedCharacterTokenText =>
+        SelectedCharacterAccount is null
+            ? string.Empty
+            : $"Access: {MaskToken(SelectedCharacterAccount.AccessToken)}{Environment.NewLine}"
+              + $"Refresh: {MaskToken(SelectedCharacterAccount.RefreshToken)}";
+
     public ManufacturingResult? Result
     {
         get => result;
@@ -1215,6 +1286,7 @@ public sealed class MainWindowViewModel : ObservableObject
     private void ClearProductionLedger()
     {
         ProductionLedgerEntries.Clear();
+        productionLedgerAssetDeductions.Clear();
         productionJobCompletionStates.Clear();
         SelectedProductionLedgerEntry = null;
         RefreshProductionLedger();
@@ -1230,6 +1302,48 @@ public sealed class MainWindowViewModel : ObservableObject
 
         Clipboard.SetText(ProductionLedgerShoppingListText);
         StatusText = "Production ledger shopping list copied";
+    }
+
+    private void UseProductionAssets()
+    {
+        if (ProductionLedgerEntries.Count == 0)
+        {
+            StatusText = "Production ledger is empty";
+            return;
+        }
+
+        if (CharacterAccounts.Count == 0)
+        {
+            StatusText = "Add at least one character before loading assets";
+            return;
+        }
+
+        var neededLines = shoppingListService.CreateFromManufacturingResults(
+                ProductionLedgerEntries.Select(entry => entry.Result))
+            .Lines
+            .ToList();
+
+        var dialog = new ProductionAssetsDialog(
+            assetService,
+            CharacterAccounts.Select(account => account.ToSaved()).ToList(),
+            neededLines)
+        {
+            Owner = Application.Current.MainWindow
+        };
+
+        if (dialog.ShowDialog() != true)
+        {
+            return;
+        }
+
+        productionLedgerAssetDeductions.Clear();
+        foreach (var deduction in dialog.SelectedDeductions)
+        {
+            productionLedgerAssetDeductions[deduction.Key] = deduction.Value;
+        }
+
+        RefreshProductionLedger();
+        StatusText = $"Applied {productionLedgerAssetDeductions.Values.Sum():N0} owned asset units to production ledger";
     }
 
     private void SaveProductionLedger()
@@ -1327,8 +1441,9 @@ public sealed class MainWindowViewModel : ObservableObject
 
     private void RefreshProductionLedger()
     {
-        productionLedgerShoppingList = shoppingListService.CreateFromManufacturingResults(
+        var baseShoppingList = shoppingListService.CreateFromManufacturingResults(
             ProductionLedgerEntries.Select(entry => entry.Result));
+        productionLedgerShoppingList = ApplyProductionLedgerAssetDeductions(baseShoppingList);
 
         ProductionLedgerMaterials.Clear();
         foreach (var line in productionLedgerShoppingList.Lines)
@@ -1342,6 +1457,41 @@ public sealed class MainWindowViewModel : ObservableObject
         OnPropertyChanged(nameof(SelectedProductionBreakdownText));
         RefreshProductionJobPlan();
         RaiseProductionLedgerCommandStates();
+    }
+
+    private ShoppingList ApplyProductionLedgerAssetDeductions(ShoppingList baseShoppingList)
+    {
+        if (productionLedgerAssetDeductions.Count == 0)
+        {
+            return baseShoppingList;
+        }
+
+        var lines = baseShoppingList.Lines
+            .Select(line =>
+            {
+                var deduction = productionLedgerAssetDeductions.TryGetValue(line.TypeId, out var quantity)
+                    ? Math.Min(quantity, line.Quantity)
+                    : 0;
+
+                var adjustedQuantity = Math.Max(0, line.Quantity - deduction);
+                if (adjustedQuantity == line.Quantity)
+                {
+                    return line;
+                }
+
+                var unitCost = line.Quantity == 0 ? 0 : line.EstimatedCost / line.Quantity;
+                return new ShoppingListLine
+                {
+                    TypeId = line.TypeId,
+                    Name = line.Name,
+                    Quantity = adjustedQuantity,
+                    EstimatedCost = unitCost * adjustedQuantity
+                };
+            })
+            .Where(line => line.Quantity > 0)
+            .ToList();
+
+        return new ShoppingList { Lines = lines };
     }
 
     private void RemoveProductionJobStatesForEntry(Guid entryId)
@@ -1568,6 +1718,7 @@ public sealed class MainWindowViewModel : ObservableObject
 
         RaiseProductionLedgerCommandStates();
         RaiseFacilityEditCommandStates();
+        RaiseCharacterCommandStates();
     }
 
     private void RaiseProductionLedgerCommandStates()
@@ -1592,6 +1743,11 @@ public sealed class MainWindowViewModel : ObservableObject
             copyCommand.RaiseCanExecuteChanged();
         }
 
+        if (UseProductionAssetsCommand is RelayCommand useAssetsCommand)
+        {
+            useAssetsCommand.RaiseCanExecuteChanged();
+        }
+
         if (SaveProductionLedgerCommand is RelayCommand saveCommand)
         {
             saveCommand.RaiseCanExecuteChanged();
@@ -1606,6 +1762,24 @@ public sealed class MainWindowViewModel : ObservableObject
     private void RaiseFacilityEditCommandStates()
     {
         if (DeleteFacilityCommand is RelayCommand deleteCommand)
+        {
+            deleteCommand.RaiseCanExecuteChanged();
+        }
+    }
+
+    private void RaiseCharacterCommandStates()
+    {
+        if (AddCharacterCommand is AsyncRelayCommand addCommand)
+        {
+            addCommand.RaiseCanExecuteChanged();
+        }
+
+        if (RefreshCharacterTokenCommand is AsyncRelayCommand refreshCommand)
+        {
+            refreshCommand.RaiseCanExecuteChanged();
+        }
+
+        if (DeleteCharacterCommand is RelayCommand deleteCommand)
         {
             deleteCommand.RaiseCanExecuteChanged();
         }
@@ -2089,6 +2263,18 @@ public sealed class MainWindowViewModel : ObservableObject
             ?? BuildBuyDepthOptions.First(option => option.Depth == BuildBuyDepth.DirectMaterialsOnly);
     }
 
+    private static string MaskToken(string token)
+    {
+        if (string.IsNullOrWhiteSpace(token))
+        {
+            return "<empty>";
+        }
+
+        return token.Length <= 12
+            ? $"{token[..Math.Min(4, token.Length)]}..."
+            : $"{token[..6]}...{token[^4..]}";
+    }
+
     private void LoadFacilityProfiles(UserSettings settings)
     {
         FacilityProfiles.Clear();
@@ -2105,6 +2291,107 @@ public sealed class MainWindowViewModel : ObservableObject
         {
             FacilityProfiles.Insert(0, FacilityOption.FromSaved(SavedFacilityProfile.None));
         }
+    }
+
+    private void LoadCharacterAccounts(UserSettings settings)
+    {
+        CharacterAccounts.Clear();
+        foreach (var account in settings.CharacterAccounts.OrderBy(account => account.CharacterName, StringComparer.OrdinalIgnoreCase))
+        {
+            CharacterAccounts.Add(CharacterAccountOption.FromSaved(account));
+        }
+
+        SelectedCharacterAccount = CharacterAccounts.FirstOrDefault();
+    }
+
+    private async Task AddCharacterAsync()
+    {
+        try
+        {
+            IsBusy = true;
+            StatusText = "Waiting for EVE SSO login";
+            var token = await characterAuthService.AddCharacterAsync(DefaultCharacterScopes);
+            UpsertCharacterAccount(token);
+            SaveUserSettings();
+            StatusText = $"Character added: {token.CharacterName}";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Could not add character: {ex.Message}";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task RefreshSelectedCharacterTokenAsync()
+    {
+        if (SelectedCharacterAccount is null)
+        {
+            return;
+        }
+
+        try
+        {
+            IsBusy = true;
+            StatusText = $"Refreshing token: {SelectedCharacterAccount.CharacterName}";
+            var token = await characterAuthService.RefreshAccessTokenAsync(SelectedCharacterAccount.ToSaved());
+            UpsertCharacterAccount(token, SelectedCharacterAccount.AddedAt);
+            SaveUserSettings();
+            StatusText = $"Token refreshed: {token.CharacterName}";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Could not refresh token: {ex.Message}";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private void DeleteSelectedCharacter()
+    {
+        if (SelectedCharacterAccount is null)
+        {
+            return;
+        }
+
+        var deletedName = SelectedCharacterAccount.CharacterName;
+        CharacterAccounts.Remove(SelectedCharacterAccount);
+        SelectedCharacterAccount = CharacterAccounts.FirstOrDefault();
+        SaveUserSettings();
+        StatusText = $"Character removed: {deletedName}";
+    }
+
+    private void UpsertCharacterAccount(EveSsoCharacterToken token, DateTimeOffset? existingAddedAt = null)
+    {
+        var account = new CharacterAccountOption(
+            token.CharacterId,
+            token.CharacterName,
+            token.AccessToken,
+            token.RefreshToken,
+            token.TokenType,
+            token.Scopes.OrderBy(scope => scope, StringComparer.Ordinal).ToList(),
+            DateTimeOffset.UtcNow.AddSeconds(Math.Max(0, token.ExpiresIn)),
+            existingAddedAt ?? DateTimeOffset.UtcNow,
+            DateTimeOffset.UtcNow);
+
+        var existing = CharacterAccounts.FirstOrDefault(character => character.CharacterId == account.CharacterId);
+        if (existing is not null)
+        {
+            var index = CharacterAccounts.IndexOf(existing);
+            CharacterAccounts[index] = account;
+        }
+        else
+        {
+            CharacterAccounts.Add(account);
+        }
+
+        SelectedCharacterAccount = account;
+        OnPropertyChanged(nameof(SelectedCharacterScopesText));
+        OnPropertyChanged(nameof(SelectedCharacterTokenText));
     }
 
     private FacilityOption FindFacility(Guid facilityId)
@@ -2129,6 +2416,7 @@ public sealed class MainWindowViewModel : ObservableObject
         userSettingsService.Save(new UserSettings
         {
             FacilityProfiles = FacilityProfiles.Select(profile => profile.ToSaved()).ToList(),
+            CharacterAccounts = CharacterAccounts.Select(account => account.ToSaved()).ToList(),
             FinalProductFacilityId = SelectedFinalProductFacility.Id,
             ComponentFacilityId = SelectedComponentFacility.Id,
             ReactionFacilityId = SelectedReactionFacility.Id,
@@ -2189,6 +2477,53 @@ public sealed class MainWindowViewModel : ObservableObject
     public sealed record SolarSystemOption(long SolarSystemId, string Name, double SecurityStatus, long RegionId)
     {
         public string DisplayName => $"{Name} ({SolarSystemId}, {SecurityStatus:0.0})";
+    }
+
+    public sealed record CharacterAccountOption(
+        long CharacterId,
+        string CharacterName,
+        string AccessToken,
+        string RefreshToken,
+        string TokenType,
+        IReadOnlyList<string> Scopes,
+        DateTimeOffset AccessTokenExpiresAt,
+        DateTimeOffset AddedAt,
+        DateTimeOffset UpdatedAt)
+    {
+        public string TokenExpiresText => AccessTokenExpiresAt.ToLocalTime().ToString("g");
+        public string AddedAtText => AddedAt.ToLocalTime().ToString("g");
+        public string ScopesPreview => Scopes.Count == 0 ? "No scopes" : string.Join(", ", Scopes.Take(3)) + (Scopes.Count > 3 ? $" +{Scopes.Count - 3}" : string.Empty);
+        public bool HasRefreshToken => !string.IsNullOrWhiteSpace(RefreshToken);
+
+        public SavedCharacterAccount ToSaved()
+        {
+            return new SavedCharacterAccount
+            {
+                CharacterId = CharacterId,
+                CharacterName = CharacterName,
+                AccessToken = AccessToken,
+                RefreshToken = RefreshToken,
+                TokenType = TokenType,
+                Scopes = Scopes.ToList(),
+                AccessTokenExpiresAt = AccessTokenExpiresAt,
+                AddedAt = AddedAt,
+                UpdatedAt = UpdatedAt
+            };
+        }
+
+        public static CharacterAccountOption FromSaved(SavedCharacterAccount account)
+        {
+            return new CharacterAccountOption(
+                account.CharacterId,
+                account.CharacterName,
+                account.AccessToken,
+                account.RefreshToken,
+                account.TokenType,
+                account.Scopes,
+                account.AccessTokenExpiresAt,
+                account.AddedAt,
+                account.UpdatedAt);
+        }
     }
 
     public sealed record ProductionLedgerEntry(
