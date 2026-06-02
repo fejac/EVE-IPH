@@ -29,7 +29,10 @@ public sealed class EveAssetService(EveSsoCharacterAuthService authService)
             var cached = LoadCachedAssets(cacheFilePath);
             if (cached.Count > 0)
             {
-                if (cached.Any(asset => asset.LocationName.StartsWith("Location ", StringComparison.OrdinalIgnoreCase)
+                var shouldRefreshForCorporationAssets = accounts.Any(account => account.Scopes.Contains("esi-assets.read_corporation_assets.v1", StringComparer.Ordinal))
+                    && cached.All(asset => !asset.IsCorporationAsset);
+
+                if (!shouldRefreshForCorporationAssets && cached.Any(asset => asset.LocationName.StartsWith("Location ", StringComparison.OrdinalIgnoreCase)
                     || asset.LocationName.StartsWith("Unknown Location ", StringComparison.OrdinalIgnoreCase)
                     || asset.LocationName.StartsWith("item ", StringComparison.OrdinalIgnoreCase)
                     || asset.LocationName.StartsWith("other ", StringComparison.OrdinalIgnoreCase)
@@ -40,7 +43,10 @@ public sealed class EveAssetService(EveSsoCharacterAuthService authService)
                     SaveCachedAssets(cacheFilePath, cached);
                 }
 
-                return cached;
+                if (!shouldRefreshForCorporationAssets)
+                {
+                    return cached;
+                }
             }
         }
 
@@ -54,6 +60,34 @@ public sealed class EveAssetService(EveSsoCharacterAuthService authService)
             {
                 CharacterId = account.CharacterId,
                 CharacterName = account.CharacterName,
+                ItemId = asset.ItemId,
+                TypeId = asset.TypeId,
+                LocationId = asset.LocationId,
+                LocationFlag = asset.LocationFlag,
+                LocationType = asset.LocationType,
+                Quantity = asset.Quantity,
+                IsSingleton = asset.IsSingleton,
+                IsBlueprintCopy = asset.IsBlueprintCopy,
+                CachedAt = DateTimeOffset.UtcNow
+            }));
+        }
+
+        var loadedCorporations = new HashSet<long>();
+        foreach (var account in accounts.Where(account => account.Scopes.Contains("esi-assets.read_corporation_assets.v1", StringComparer.Ordinal)))
+        {
+            var corporationId = await FetchCharacterCorporationIdAsync(account.CharacterId, cancellationToken).ConfigureAwait(false);
+            if (corporationId <= 0 || !loadedCorporations.Add(corporationId))
+            {
+                continue;
+            }
+
+            var corporationAssets = await FetchCorporationAssetsAsync(account, corporationId, cancellationToken).ConfigureAwait(false);
+            assets.AddRange(corporationAssets.Select(asset => new CachedEveAsset
+            {
+                CharacterId = account.CharacterId,
+                CharacterName = account.CharacterName,
+                CorporationId = corporationId,
+                IsCorporationAsset = true,
                 ItemId = asset.ItemId,
                 TypeId = asset.TypeId,
                 LocationId = asset.LocationId,
@@ -107,9 +141,62 @@ public sealed class EveAssetService(EveSsoCharacterAuthService authService)
         return assets;
     }
 
+    private async Task<IReadOnlyList<EsiAssetDto>> FetchCorporationAssetsAsync(SavedCharacterAccount account, long corporationId, CancellationToken cancellationToken)
+    {
+        var assets = new List<EsiAssetDto>();
+        var accessToken = account.AccessToken;
+        var page = 1;
+        var pages = 1;
+
+        do
+        {
+            using var request = CreateCorporationAssetRequest(corporationId, accessToken, page);
+            using var response = await httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+
+            if (response.StatusCode == HttpStatusCode.Forbidden || response.StatusCode == HttpStatusCode.NotFound)
+            {
+                return assets;
+            }
+
+            if (response.StatusCode == HttpStatusCode.Unauthorized)
+            {
+                var refreshed = await authService.RefreshAccessTokenAsync(account, cancellationToken).ConfigureAwait(false);
+                accessToken = refreshed.AccessToken;
+                using var retryRequest = CreateCorporationAssetRequest(corporationId, accessToken, page);
+                using var retryResponse = await httpClient.SendAsync(retryRequest, cancellationToken).ConfigureAwait(false);
+                if (retryResponse.StatusCode == HttpStatusCode.Forbidden || retryResponse.StatusCode == HttpStatusCode.NotFound)
+                {
+                    return assets;
+                }
+
+                retryResponse.EnsureSuccessStatusCode();
+                pages = GetPageCount(retryResponse);
+                assets.AddRange(await ReadAssetsAsync(retryResponse, cancellationToken).ConfigureAwait(false));
+            }
+            else
+            {
+                response.EnsureSuccessStatusCode();
+                pages = GetPageCount(response);
+                assets.AddRange(await ReadAssetsAsync(response, cancellationToken).ConfigureAwait(false));
+            }
+
+            page++;
+        }
+        while (page <= pages);
+
+        return assets;
+    }
+
     private static HttpRequestMessage CreateAssetRequest(long characterId, string accessToken, int page)
     {
         var request = new HttpRequestMessage(HttpMethod.Get, $"https://esi.evetech.net/latest/characters/{characterId}/assets/?datasource=tranquility&page={page}");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+        return request;
+    }
+
+    private static HttpRequestMessage CreateCorporationAssetRequest(long corporationId, string accessToken, int page)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Get, $"https://esi.evetech.net/latest/corporations/{corporationId}/assets/?datasource=tranquility&page={page}");
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
         return request;
     }
@@ -143,10 +230,17 @@ public sealed class EveAssetService(EveSsoCharacterAuthService authService)
             .Distinct()
             .ToList();
 
-        var names = await FetchUniverseNamesAsync(typeIds.Concat(publicLocationIds).Distinct().ToList(), cancellationToken).ConfigureAwait(false);
+        var assetsByItemId = assets.ToDictionary(asset => asset.ItemId);
+        var rootLocationIds = assets
+            .Select(asset => FindRootLocationId(asset, assetsByItemId))
+            .Where(id => id > 0)
+            .Distinct()
+            .ToList();
+
+        var names = await FetchUniverseNamesAsync(typeIds.Concat(publicLocationIds).Concat(rootLocationIds.Where(id => id < 1_000_000_000_000)).Distinct().ToList(), cancellationToken).ConfigureAwait(false);
         var assetLocationNames = await FetchAssetLocationNamesAsync(assets, accounts, cancellationToken).ConfigureAwait(false);
-        var structureInfos = await FetchStructureInfosAsync(assets, accounts, cancellationToken).ConfigureAwait(false);
-        var stationInfos = await FetchStationInfosAsync(assets, cancellationToken).ConfigureAwait(false);
+        var structureInfos = await FetchStructureInfosAsync(assets, rootLocationIds, accounts, cancellationToken).ConfigureAwait(false);
+        var stationInfos = await FetchStationInfosAsync(assets, rootLocationIds, cancellationToken).ConfigureAwait(false);
         var solarSystemNames = await FetchUniverseNamesAsync(
             structureInfos.Values.Select(info => info.SolarSystemId)
                 .Concat(stationInfos.Values.Select(info => info.SolarSystemId))
@@ -173,7 +267,6 @@ public sealed class EveAssetService(EveSsoCharacterAuthService authService)
                             : FormatUnknownLocation(asset.LocationId, asset.LocationType);
         }
 
-        var assetsByItemId = assets.ToDictionary(asset => asset.ItemId);
         foreach (var asset in assets)
         {
             var rootLocationId = FindRootLocationId(asset, assetsByItemId);
@@ -231,7 +324,7 @@ public sealed class EveAssetService(EveSsoCharacterAuthService authService)
 
             var assetItemIds = characterGroup.Select(asset => asset.ItemId).ToHashSet();
             var locationItemIds = characterGroup
-                .Where(asset => assetItemIds.Contains(asset.LocationId))
+                .Where(asset => !asset.IsCorporationAsset && assetItemIds.Contains(asset.LocationId))
                 .Select(asset => asset.LocationId)
                 .Distinct()
                 .ToList();
@@ -239,6 +332,40 @@ public sealed class EveAssetService(EveSsoCharacterAuthService authService)
             foreach (var chunk in locationItemIds.Chunk(1000))
             {
                 using var response = await SendAssetNamesRequestAsync(account, chunk, cancellationToken).ConfigureAwait(false);
+                if (!response.IsSuccessStatusCode)
+                {
+                    continue;
+                }
+
+                await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+                var rows = await JsonSerializer.DeserializeAsync<List<EsiAssetNameDto>>(stream, JsonOptions, cancellationToken).ConfigureAwait(false) ?? [];
+                foreach (var row in rows)
+                {
+                    names[(account.CharacterId, row.ItemId)] = row.Name;
+                }
+            }
+        }
+
+        foreach (var corporationGroup in assets.Where(asset => asset.IsCorporationAsset && asset.CorporationId > 0).GroupBy(asset => asset.CorporationId))
+        {
+            var account = accounts.FirstOrDefault(account => assets.Any(asset => asset.IsCorporationAsset
+                && asset.CorporationId == corporationGroup.Key
+                && asset.CharacterId == account.CharacterId));
+            if (account is null)
+            {
+                continue;
+            }
+
+            var assetItemIds = corporationGroup.Select(asset => asset.ItemId).ToHashSet();
+            var locationItemIds = corporationGroup
+                .Where(asset => assetItemIds.Contains(asset.LocationId))
+                .Select(asset => asset.LocationId)
+                .Distinct()
+                .ToList();
+
+            foreach (var chunk in locationItemIds.Chunk(1000))
+            {
+                using var response = await SendCorporationAssetNamesRequestAsync(account, corporationGroup.Key, chunk, cancellationToken).ConfigureAwait(false);
                 if (!response.IsSuccessStatusCode)
                 {
                     continue;
@@ -287,8 +414,41 @@ public sealed class EveAssetService(EveSsoCharacterAuthService authService)
         return await httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
     }
 
+    private async Task<HttpResponseMessage> SendCorporationAssetNamesRequestAsync(
+        SavedCharacterAccount account,
+        long corporationId,
+        IEnumerable<long> itemIds,
+        CancellationToken cancellationToken)
+    {
+        var payload = JsonSerializer.Serialize(itemIds);
+        var response = await SendCorporationAssetNamesRequestAsync(corporationId, account.AccessToken, payload, cancellationToken).ConfigureAwait(false);
+        if (response.StatusCode != HttpStatusCode.Unauthorized)
+        {
+            return response;
+        }
+
+        response.Dispose();
+        var refreshed = await authService.RefreshAccessTokenAsync(account, cancellationToken).ConfigureAwait(false);
+        return await SendCorporationAssetNamesRequestAsync(corporationId, refreshed.AccessToken, payload, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<HttpResponseMessage> SendCorporationAssetNamesRequestAsync(
+        long corporationId,
+        string accessToken,
+        string payload,
+        CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(
+            HttpMethod.Post,
+            $"https://esi.evetech.net/latest/corporations/{corporationId}/assets/names/?datasource=tranquility");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+        request.Content = new StringContent(payload, Encoding.UTF8, "application/json");
+        return await httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+    }
+
     private async Task<Dictionary<long, StructureInfo>> FetchStructureInfosAsync(
         IReadOnlyList<CachedEveAsset> assets,
+        IReadOnlyList<long> rootLocationIds,
         IReadOnlyList<SavedCharacterAccount> accounts,
         CancellationToken cancellationToken)
     {
@@ -297,6 +457,7 @@ public sealed class EveAssetService(EveSsoCharacterAuthService authService)
         var structureIds = assets
             .Where(asset => asset.LocationId >= 1_000_000_000_000 || (asset.LocationId > 70000000 && !assetItemIds.Contains(asset.LocationId)))
             .Select(asset => asset.LocationId)
+            .Concat(rootLocationIds.Where(id => id >= 1_000_000_000_000 || id > 70000000))
             .Distinct()
             .ToList();
 
@@ -325,12 +486,14 @@ public sealed class EveAssetService(EveSsoCharacterAuthService authService)
 
     private async Task<Dictionary<long, StationInfo>> FetchStationInfosAsync(
         IReadOnlyList<CachedEveAsset> assets,
+        IReadOnlyList<long> rootLocationIds,
         CancellationToken cancellationToken)
     {
         var infos = new Dictionary<long, StationInfo>();
         var stationIds = assets
             .Where(asset => asset.LocationId >= 60000000 && asset.LocationId < 70000000)
             .Select(asset => asset.LocationId)
+            .Concat(rootLocationIds.Where(id => id >= 60000000 && id < 70000000))
             .Distinct()
             .ToList();
 
@@ -382,6 +545,22 @@ public sealed class EveAssetService(EveSsoCharacterAuthService authService)
             $"https://esi.evetech.net/latest/universe/structures/{structureId}/?datasource=tranquility");
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
         return await httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<long> FetchCharacterCorporationIdAsync(long characterId, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.GetAsync(
+            $"https://esi.evetech.net/latest/characters/{characterId}/?datasource=tranquility",
+            cancellationToken).ConfigureAwait(false);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            return 0;
+        }
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+        var character = await JsonSerializer.DeserializeAsync<EsiCharacterDto>(stream, JsonOptions, cancellationToken).ConfigureAwait(false);
+        return character?.CorporationId ?? 0;
     }
 
     private static string FormatUnknownLocation(long locationId, string locationType)
@@ -525,6 +704,12 @@ public sealed class EveAssetService(EveSsoCharacterAuthService authService)
         public long SolarSystemId { get; init; }
     }
 
+    private sealed class EsiCharacterDto
+    {
+        [JsonPropertyName("corporation_id")]
+        public long CorporationId { get; init; }
+    }
+
     private sealed record StructureInfo(string Name, long SolarSystemId);
 
     private sealed record StationInfo(string Name, long SolarSystemId);
@@ -534,6 +719,8 @@ public sealed class CachedEveAsset
 {
     public long CharacterId { get; init; }
     public string CharacterName { get; init; } = string.Empty;
+    public long CorporationId { get; init; }
+    public bool IsCorporationAsset { get; init; }
     public long ItemId { get; init; }
     public string ItemName { get; set; } = string.Empty;
     public long TypeId { get; init; }

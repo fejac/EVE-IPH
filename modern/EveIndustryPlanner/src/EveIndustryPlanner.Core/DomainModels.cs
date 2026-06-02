@@ -106,6 +106,32 @@ public sealed class MaterialRequirement
     public double TotalVolume { get; init; }
     public MaterialCategory Category { get; init; }
     public bool MissingPrice { get; init; }
+    public bool HasEnoughMarketVolume { get; init; } = true;
+    public long MarketFilledQuantity { get; init; }
+    public MaterialCalculationBreakdown Calculation { get; init; } = new();
+    public string CalculationText => Calculation.FormulaText;
+    public string MarketStatus => MissingPrice
+        ? "Missing price"
+        : HasEnoughMarketVolume
+            ? "OK"
+            : $"Only {MarketFilledQuantity:N0} / {Quantity:N0}";
+}
+
+public sealed class MaterialCalculationBreakdown
+{
+    public long BaseQuantity { get; init; }
+    public int RunsPerJob { get; init; }
+    public int Lines { get; init; } = 1;
+    public int MaterialEfficiency { get; init; }
+    public decimal BlueprintMaterialMultiplier { get; init; } = 1m;
+    public decimal FacilityMaterialMultiplier { get; init; } = 1m;
+    public decimal RawQuantityPerJob { get; init; }
+    public decimal RoundedQuantityPerJob { get; init; }
+    public long QuantityPerJob { get; init; }
+    public long TotalQuantity { get; init; }
+
+    public string FormulaText =>
+        $"{BaseQuantity:N0} x {RunsPerJob:N0} x {BlueprintMaterialMultiplier:N4} x {FacilityMaterialMultiplier:N4} = {RawQuantityPerJob:N2} -> {RoundedQuantityPerJob:N2} -> {QuantityPerJob:N0} x {Lines:N0} = {TotalQuantity:N0}";
 }
 
 public sealed class MarketPrice
@@ -236,6 +262,7 @@ public sealed class ManufacturingRequest
 {
     public BlueprintId BlueprintId { get; init; }
     public int Runs { get; init; }
+    public int Lines { get; init; } = 1;
     public int MaterialEfficiency { get; init; }
     public int TimeEfficiency { get; init; }
     public decimal AdditionalCosts { get; init; }

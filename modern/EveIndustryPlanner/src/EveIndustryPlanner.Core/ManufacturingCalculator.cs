@@ -21,17 +21,17 @@ public sealed class ManufacturingCalculator(
             warnings.Add($"Missing market price for {blueprint.ProductName}.");
         }
 
-        var outputQuantity = blueprint.ProductQuantity * request.Runs;
+        var totalRuns = request.Runs * request.Lines;
+        var outputQuantity = blueprint.ProductQuantity * totalRuns;
         var productUnitPrice = productPrice?.Select(request.PriceProfile.ProductPriceSelection) ?? 0m;
         var estimatedItemValue = productUnitPrice * outputQuantity;
         var finalFacility = FacilityFittingCalculator.ApplyBlueprintScope(GetFinalFacility(request), blueprint);
-        var jobCost = CalculateJobCost(estimatedItemValue, finalFacility);
-        var productionTime = CalculateProductionTime(blueprint.BaseProductionTime, request.Runs, request.TimeEfficiency, finalFacility.TimeMultiplier);
-        var productionJobs = new List<ProductionJobRequirement>
-        {
-            CreateProductionJob(blueprint, GetFinalFacility(request), finalFacility, outputQuantity, request.Runs, request.TimeEfficiency, 0, string.Empty)
-        };
-        var buildPlan = await ResolveMaterialsAsync(blueprint, request, materialPriceProfile, GetFinalFacility(request), request.Runs, 0, [], warnings, cancellationToken);
+        var jobCost = CalculateJobCost(productUnitPrice * blueprint.ProductQuantity * request.Runs, finalFacility) * request.Lines;
+        var productionTime = TimeSpan.FromTicks(CalculateProductionTime(blueprint.BaseProductionTime, request.Runs, request.TimeEfficiency, finalFacility.TimeMultiplier).Ticks * request.Lines);
+        var productionJobs = Enumerable.Range(0, request.Lines)
+            .Select(_ => CreateProductionJob(blueprint, GetFinalFacility(request), finalFacility, blueprint.ProductQuantity * request.Runs, request.Runs, request.TimeEfficiency, 0, string.Empty))
+            .ToList();
+        var buildPlan = await ResolveMaterialsAsync(blueprint, request, materialPriceProfile, GetFinalFacility(request), request.Runs, request.Lines, 0, [], warnings, cancellationToken);
         productionJobs.AddRange(buildPlan.Jobs);
         var materialCost = buildPlan.MaterialCost;
         var totalJobCost = jobCost + buildPlan.JobCost;
@@ -69,9 +69,29 @@ public sealed class ManufacturingCalculator(
 
     public static long CalculateMaterialQuantity(long baseQuantity, int runs, int materialEfficiency, decimal facilityMaterialMultiplier)
     {
-        var efficiencyMultiplier = 1m - materialEfficiency / 100m;
-        var quantity = baseQuantity * runs * efficiencyMultiplier * facilityMaterialMultiplier;
-        return Math.Max(1, (long)Math.Ceiling(quantity));
+        return CalculateMaterialBreakdown(baseQuantity, runs, 1, materialEfficiency, facilityMaterialMultiplier).QuantityPerJob;
+    }
+
+    public static MaterialCalculationBreakdown CalculateMaterialBreakdown(long baseQuantity, int runs, int lines, int materialEfficiency, decimal facilityMaterialMultiplier)
+    {
+        var blueprintMaterialMultiplier = 1m - materialEfficiency / 100m;
+        var rawQuantityPerJob = baseQuantity * runs * blueprintMaterialMultiplier * facilityMaterialMultiplier;
+        var roundedQuantityPerJob = Math.Round(rawQuantityPerJob, 2, MidpointRounding.AwayFromZero);
+        var quantityPerJob = Math.Max(runs, (long)Math.Ceiling(roundedQuantityPerJob));
+
+        return new MaterialCalculationBreakdown
+        {
+            BaseQuantity = baseQuantity,
+            RunsPerJob = runs,
+            Lines = lines,
+            MaterialEfficiency = materialEfficiency,
+            BlueprintMaterialMultiplier = blueprintMaterialMultiplier,
+            FacilityMaterialMultiplier = facilityMaterialMultiplier,
+            RawQuantityPerJob = rawQuantityPerJob,
+            RoundedQuantityPerJob = roundedQuantityPerJob,
+            QuantityPerJob = quantityPerJob,
+            TotalQuantity = quantityPerJob * lines
+        };
     }
 
     public static TimeSpan CalculateProductionTime(TimeSpan baseTime, int runs, int timeEfficiency, decimal facilityTimeMultiplier)
@@ -86,6 +106,11 @@ public sealed class ManufacturingCalculator(
         if (request.Runs <= 0)
         {
             throw new ArgumentOutOfRangeException(nameof(request), "Runs must be greater than zero.");
+        }
+
+        if (request.Lines <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(request), "Lines must be greater than zero.");
         }
 
         if (request.MaterialEfficiency is < 0 or > 10)
@@ -115,6 +140,7 @@ public sealed class ManufacturingCalculator(
         PriceProfile materialPriceProfile,
         FacilityProfile facility,
         int runs,
+        int lines,
         int depth,
         HashSet<TypeId> activeProductTypes,
         List<string> warnings,
@@ -131,8 +157,9 @@ public sealed class ManufacturingCalculator(
 
         foreach (var material in blueprint.Materials)
         {
-            var quantity = CalculateMaterialQuantity(material.Quantity, runs, request.MaterialEfficiency, effectiveFacility.MaterialMultiplier);
-            var buyRequirement = await CreateBuyRequirementAsync(material, quantity, request.PriceProfile.MaterialPriceSelection, materialPriceProfile, warnings, cancellationToken);
+            var calculation = CalculateMaterialBreakdown(material.Quantity, runs, lines, request.MaterialEfficiency, effectiveFacility.MaterialMultiplier);
+            var quantity = calculation.TotalQuantity;
+            var buyRequirement = await CreateBuyRequirementAsync(material, quantity, calculation, request.PriceProfile.MaterialPriceSelection, materialPriceProfile, warnings, cancellationToken);
             var buyCost = buyRequirement.TotalPrice;
 
             if (request.EnableBuildBuy && depth < request.MaxBuildBuyDepth)
@@ -151,6 +178,7 @@ public sealed class ManufacturingCalculator(
                         materialPriceProfile,
                         componentFacility,
                         componentRuns,
+                        1,
                         depth + 1,
                         new HashSet<TypeId>(activeProductTypes),
                         warnings,
@@ -198,6 +226,7 @@ public sealed class ManufacturingCalculator(
     private async Task<MaterialRequirement> CreateBuyRequirementAsync(
         BlueprintMaterial material,
         long quantity,
+        MaterialCalculationBreakdown calculation,
         MarketPriceSelection priceSelection,
         PriceProfile materialPriceProfile,
         List<string> warnings,
@@ -221,7 +250,10 @@ public sealed class ManufacturingCalculator(
                     UnitPrice = effectivePrice.UnitPrice,
                     TotalVolume = quantity * material.Volume,
                     Category = material.Category,
-                    MissingPrice = false
+                    MissingPrice = false,
+                    HasEnoughMarketVolume = effectivePrice.HasEnoughVolume,
+                    MarketFilledQuantity = effectivePrice.FilledQuantity,
+                    Calculation = calculation
                 };
             }
         }
@@ -242,7 +274,10 @@ public sealed class ManufacturingCalculator(
             UnitPrice = unitPrice,
             TotalVolume = quantity * material.Volume,
             Category = material.Category,
-            MissingPrice = price is null
+            MissingPrice = price is null,
+            HasEnoughMarketVolume = true,
+            MarketFilledQuantity = quantity,
+            Calculation = calculation
         };
     }
 

@@ -26,6 +26,8 @@ public sealed class MainWindowViewModel : ObservableObject
     private string searchText = string.Empty;
     private BlueprintSearchResult? selectedBlueprint;
     private int runs = 1;
+    private int lines = 1;
+    private int finalMaxRunsPerJob;
     private int materialEfficiency = 10;
     private int timeEfficiency = 20;
     private decimal additionalCosts;
@@ -74,6 +76,7 @@ public sealed class MainWindowViewModel : ObservableObject
     private ShoppingList? shoppingList;
     private ShoppingList productionLedgerShoppingList = new();
     private readonly Dictionary<TypeId, long> productionLedgerAssetDeductions = new();
+    private readonly Dictionary<Guid, IReadOnlyList<ManufacturingResult>> productionLedgerSplitResults = new();
     private ProductionLedgerEntry? selectedProductionLedgerEntry;
     private Dictionary<string, ProductionJobCompletionState> productionJobCompletionStates = new(StringComparer.Ordinal);
     private ProductionPlannerScopeOption selectedProductionPlannerScope;
@@ -186,7 +189,7 @@ public sealed class MainWindowViewModel : ObservableObject
         UseProductionAssetsCommand = new RelayCommand(UseProductionAssets, () => ProductionLedgerEntries.Count > 0 && CharacterAccounts.Count > 0);
         SaveProductionLedgerCommand = new RelayCommand(SaveProductionLedger, () => ProductionLedgerEntries.Count > 0);
         LoadProductionLedgerCommand = new RelayCommand(LoadProductionLedger);
-        RecalculateProductionPlanCommand = new RelayCommand(RefreshProductionJobPlan, () => ProductionLedgerEntries.Count > 0);
+        RecalculateProductionPlanCommand = new AsyncRelayCommand(RecalculateProductionLedgerPlanningAsync, () => ProductionLedgerEntries.Count > 0 && !IsBusy);
         SaveFacilityCommand = new RelayCommand(SaveFacility);
         NewFacilityCommand = new RelayCommand(NewFacility);
         DeleteFacilityCommand = new RelayCommand(DeleteFacility, () => CanDeleteSelectedFacility);
@@ -362,7 +365,7 @@ public sealed class MainWindowViewModel : ObservableObject
     public int SelectedWorkspaceTab
     {
         get => selectedWorkspaceTab;
-        set => SetProperty(ref selectedWorkspaceTab, Math.Clamp(value, 0, 2));
+        set => SetProperty(ref selectedWorkspaceTab, Math.Clamp(value, 0, 4));
     }
 
     public string SearchText
@@ -387,6 +390,18 @@ public sealed class MainWindowViewModel : ObservableObject
     {
         get => runs;
         set => SetProperty(ref runs, Math.Max(1, value));
+    }
+
+    public int Lines
+    {
+        get => lines;
+        set => SetProperty(ref lines, Math.Max(1, value));
+    }
+
+    public int FinalMaxRunsPerJob
+    {
+        get => finalMaxRunsPerJob;
+        set => SetProperty(ref finalMaxRunsPerJob, Math.Max(0, value));
     }
 
     public int MaterialEfficiency
@@ -981,6 +996,7 @@ public sealed class MainWindowViewModel : ObservableObject
                 OnPropertyChanged(nameof(CalculationBreakdownText));
                 OnPropertyChanged(nameof(OutputText));
                 OnPropertyChanged(nameof(WarningText));
+                OnPropertyChanged(nameof(MaterialAuditSummaryText));
                 RaiseProductionLedgerCommandStates();
             }
         }
@@ -1029,6 +1045,10 @@ public sealed class MainWindowViewModel : ObservableObject
     public string WarningText => Result is null || Result.Warnings.Count == 0
         ? BuildBuyText
         : string.Join(Environment.NewLine, Result.Warnings.Concat(BuildBuyTextLines));
+
+    public string MaterialAuditSummaryText => Result is null
+        ? string.Empty
+        : $"{Result.Materials.Count:N0} materials | {Result.Materials.Count(material => material.MissingPrice):N0} missing prices | {Result.Materials.Count(material => !material.HasEnoughMarketVolume):N0} low instant-buy volume";
 
     public string CalculationBreakdownText => Result is null
         ? string.Empty
@@ -1191,8 +1211,19 @@ public sealed class MainWindowViewModel : ObservableObject
             var estimatedCalendar = EstimateWaveCalendarTime(openRows);
             var remainingJobTime = TimeSpan.FromTicks(openRows.Sum(row => row.Duration.Ticks));
             var waveCount = allRows.Select(row => row.Wave).DefaultIfEmpty(0).Max();
+            var dependencyWarnings = BuildProductionDependencyWarnings(allRows).Count;
+            var warningText = dependencyWarnings == 0 ? string.Empty : $" | {dependencyWarnings:N0} dependency warnings";
 
-            return $"{openRows.Count:N0} open / {allRows.Count:N0} total jobs | {waveCount:N0} waves | remaining job time {FormatDuration(remainingJobTime)} | estimated calendar {FormatDuration(estimatedCalendar)}";
+            return $"{openRows.Count:N0} open / {allRows.Count:N0} total jobs | {waveCount:N0} waves | remaining job time {FormatDuration(remainingJobTime)} | estimated calendar {FormatDuration(estimatedCalendar)}{warningText}";
+        }
+    }
+
+    public string ProductionJobPlanWarningsText
+    {
+        get
+        {
+            var warnings = BuildProductionDependencyWarnings(BuildProductionJobRows(applyFilter: false).ToList());
+            return warnings.Count == 0 ? string.Empty : string.Join(Environment.NewLine, warnings);
         }
     }
 
@@ -1303,13 +1334,19 @@ public sealed class MainWindowViewModel : ObservableObject
 
     private ManufacturingRequest CreateManufacturingRequest(BlueprintId blueprintId)
     {
+        return CreateManufacturingRequest(blueprintId, Runs, Lines, MaterialEfficiency, TimeEfficiency, AdditionalCosts);
+    }
+
+    private ManufacturingRequest CreateManufacturingRequest(BlueprintId blueprintId, int requestRuns, int requestLines, int requestMaterialEfficiency, int requestTimeEfficiency, decimal requestAdditionalCosts)
+    {
         return new ManufacturingRequest
         {
             BlueprintId = blueprintId,
-            Runs = Runs,
-            MaterialEfficiency = MaterialEfficiency,
-            TimeEfficiency = TimeEfficiency,
-            AdditionalCosts = AdditionalCosts,
+            Runs = requestRuns,
+            Lines = requestLines,
+            MaterialEfficiency = requestMaterialEfficiency,
+            TimeEfficiency = requestTimeEfficiency,
+            AdditionalCosts = requestAdditionalCosts,
             EnableBuildBuy = EnableBuildBuy,
             BuildBuyDepth = SelectedBuildBuyDepth.Depth,
             MaxBuildBuyDepth = MaxBuildBuyDepth,
@@ -1391,7 +1428,9 @@ public sealed class MainWindowViewModel : ObservableObject
                         scanResult.ProfitPercent,
                         scanResult.IskPerHour,
                         scanResult.TotalProductionTime,
-                        scanResult.Warnings.Count));
+                        scanResult.Warnings.Count,
+                        scanResult.Materials.Count(material => material.MissingPrice),
+                        scanResult.Materials.Count(material => !material.HasEnoughMarketVolume)));
                 }
                 catch (Exception ex) when (ex is InvalidOperationException or ArgumentOutOfRangeException or HttpRequestException or JsonException or TaskCanceledException)
                 {
@@ -1413,6 +1452,8 @@ public sealed class MainWindowViewModel : ObservableObject
                         0,
                         TimeSpan.Zero,
                         1,
+                        0,
+                        0,
                         ex.Message));
                 }
             }
@@ -1452,6 +1493,8 @@ public sealed class MainWindowViewModel : ObservableObject
             SelectedMarketScannerTechFilter.Filter,
             MarketScannerMaxItems,
             Runs,
+            Lines,
+            FinalMaxRunsPerJob,
             MaterialEfficiency,
             TimeEfficiency,
             AdditionalCosts,
@@ -1588,6 +1631,7 @@ public sealed class MainWindowViewModel : ObservableObject
             Result.Blueprint.BlueprintName,
             Result.Blueprint.ProductName,
             Runs,
+            Lines,
             MaterialEfficiency,
             TimeEfficiency,
             SelectedMaterialMarket.Name,
@@ -1595,12 +1639,15 @@ public sealed class MainWindowViewModel : ObservableObject
             SelectedFinalProductFacility.Name,
             SelectedComponentFacility.Name,
             SelectedReactionFacility.Name,
-            Result);
+            Result)
+        {
+            MaxRunsPerJob = FinalMaxRunsPerJob
+        };
 
         ProductionLedgerEntries.Add(entry);
         SelectedProductionLedgerEntry = entry;
         RefreshProductionLedger();
-        SelectedWorkspaceTab = 1;
+        SelectedWorkspaceTab = 2;
         StatusText = $"Added to production ledger: {entry.ProductName}";
     }
 
@@ -1614,6 +1661,7 @@ public sealed class MainWindowViewModel : ObservableObject
         var removed = SelectedProductionLedgerEntry;
         ProductionLedgerEntries.Remove(removed);
         RemoveProductionJobStatesForEntry(removed.Id);
+        productionLedgerSplitResults.Remove(removed.Id);
         SelectedProductionLedgerEntry = ProductionLedgerEntries.FirstOrDefault();
         RefreshProductionLedger();
         StatusText = $"Removed from production ledger: {removed.ProductName}";
@@ -1623,6 +1671,7 @@ public sealed class MainWindowViewModel : ObservableObject
     {
         ProductionLedgerEntries.Clear();
         productionLedgerAssetDeductions.Clear();
+        productionLedgerSplitResults.Clear();
         productionJobCompletionStates.Clear();
         SelectedProductionLedgerEntry = null;
         RefreshProductionLedger();
@@ -1654,10 +1703,7 @@ public sealed class MainWindowViewModel : ObservableObject
             return;
         }
 
-        var neededLines = shoppingListService.CreateFromManufacturingResults(
-                ProductionLedgerEntries.Select(entry => entry.Result))
-            .Lines
-            .ToList();
+        var neededLines = productionLedgerShoppingList.Lines.ToList();
 
         var dialog = new ProductionAssetsDialog(
             assetService,
@@ -1784,17 +1830,19 @@ public sealed class MainWindowViewModel : ObservableObject
             ProductionLedgerEntry? firstLoadedEntry = null;
             foreach (var entry in loadedEntries)
             {
-                var entryToAdd = existingEntryIds.Add(entry.Id)
-                    ? entry
-                    : entry with { Id = Guid.NewGuid() };
-                existingEntryIds.Add(entryToAdd.Id);
-                ProductionLedgerEntries.Add(entryToAdd);
-                firstLoadedEntry ??= entryToAdd;
+                if (!existingEntryIds.Add(entry.Id))
+                {
+                    entry.Id = Guid.NewGuid();
+                    existingEntryIds.Add(entry.Id);
+                }
+
+                ProductionLedgerEntries.Add(entry);
+                firstLoadedEntry ??= entry;
             }
 
             SelectedProductionLedgerEntry = firstLoadedEntry ?? ProductionLedgerEntries.FirstOrDefault();
             RefreshProductionLedger();
-            SelectedWorkspaceTab = 1;
+            SelectedWorkspaceTab = 2;
             StatusText = $"Loaded {loadedEntries.Count:N0} production jobs from {dialog.FileNames.Length:N0} JSON file(s)";
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
@@ -1806,7 +1854,7 @@ public sealed class MainWindowViewModel : ObservableObject
     private void RefreshProductionLedger()
     {
         var baseShoppingList = shoppingListService.CreateFromManufacturingResults(
-            ProductionLedgerEntries.Select(entry => entry.Result));
+            ProductionLedgerEntries.SelectMany(GetProductionLedgerResults));
         productionLedgerShoppingList = ApplyProductionLedgerAssetDeductions(baseShoppingList);
 
         ProductionLedgerMaterials.Clear();
@@ -1877,6 +1925,7 @@ public sealed class MainWindowViewModel : ObservableObject
         }
 
         OnPropertyChanged(nameof(ProductionJobPlanSummaryText));
+        OnPropertyChanged(nameof(ProductionJobPlanWarningsText));
     }
 
     private IEnumerable<PlannedProductionJobRow> BuildProductionJobRows(bool applyFilter)
@@ -1888,79 +1937,106 @@ public sealed class MainWindowViewModel : ObservableObject
         var requirements = sourceEntries
             .SelectMany(entry =>
             {
-                var jobs = entry.Result.ProductionJobs.ToList();
-                var maxDepth = jobs.Select(job => job.Depth).DefaultIfEmpty(0).Max();
-                return jobs.Select(job => new ProductionJobRequirementSource(
-                    entry.Id,
-                    entry.ProductName,
-                    job,
-                    maxDepth - job.Depth + 1));
+                var hasSplitResults = productionLedgerSplitResults.ContainsKey(entry.Id);
+                return GetProductionLedgerResults(entry).SelectMany((result, resultIndex) =>
+                {
+                    var jobs = result.ProductionJobs.ToList();
+                    var maxDepth = jobs.Select(job => job.Depth).DefaultIfEmpty(0).Max();
+                    return jobs.Select((job, jobIndex) => new ProductionJobRequirementSource(
+                        entry.Id,
+                        entry.ProductName,
+                        job,
+                        maxDepth - job.Depth + 1,
+                        hasSplitResults ? 0 : job.BlueprintId.Value == entry.BlueprintId ? entry.MaxRunsPerJob : 0,
+                        hasSplitResults ? resultIndex : -1,
+                        jobIndex));
+                });
             })
-            .GroupBy(source => new
-            {
+            .Select(source => new AggregatedProductionJobRequirement(
+                source.SourceProductName,
+                source.Requirement.ParentProductName,
                 source.Requirement.BlueprintId,
+                source.Requirement.BlueprintName,
                 source.Requirement.ProductTypeId,
+                source.Requirement.ProductName,
                 source.Requirement.ActivityType,
                 source.Requirement.FacilityName,
+                source.Requirement.RequiredQuantity,
                 source.Requirement.OutputQuantityPerRun,
-                source.DependencyStage
-            })
-            .Select(group => new AggregatedProductionJobRequirement(
-                string.Join(", ", group.Select(source => source.SourceProductName).Distinct(StringComparer.Ordinal).OrderBy(name => name)),
-                string.Join(", ", group.Select(source => source.Requirement.ParentProductName).Where(name => !string.IsNullOrWhiteSpace(name)).Distinct(StringComparer.Ordinal).OrderBy(name => name)),
-                group.First().Requirement.BlueprintId,
-                group.First().Requirement.BlueprintName,
-                group.First().Requirement.ProductTypeId,
-                group.First().Requirement.ProductName,
-                group.Key.ActivityType,
-                group.Key.FacilityName,
-                group.Sum(source => source.Requirement.RequiredQuantity),
-                group.Key.OutputQuantityPerRun,
-                group.Sum(source => source.Requirement.TotalRuns),
-                group.First().Requirement.TimePerRun,
-                group.Key.DependencyStage,
-                group.Min(source => source.Requirement.Depth)))
+                source.Requirement.TotalRuns,
+                source.Requirement.TimePerRun,
+                source.DependencyStage,
+                source.Requirement.Depth,
+                source.MaxRunsPerJob,
+                source.SplitGroupIndex,
+                source.JobIndex))
             .OrderBy(requirement => requirement.DependencyStage)
             .ThenBy(requirement => requirement.ProductName)
             .ToList();
 
-        foreach (var requirement in requirements)
-        {
-            var maxJobDuration = TimeSpan.FromHours((double)(requirement.ActivityType == BlueprintActivityType.Reaction
-                ? MaxReactionJobHours
-                : MaxManufacturingJobHours));
-            var runsPerJob = CalculateRunsPerJob(requirement.TotalRuns, requirement.TimePerRun, maxJobDuration);
-            var jobCount = (int)Math.Ceiling(requirement.TotalRuns / (decimal)runsPerJob);
-
-            for (var index = 0; index < jobCount; index++)
+        var expandedRequirements = requirements
+            .SelectMany(requirement =>
             {
-                var runs = Math.Min(runsPerJob, requirement.TotalRuns - index * runsPerJob);
-                var duration = TimeSpan.FromTicks(requirement.TimePerRun.Ticks * runs);
-                var stableKey = $"{requirement.BlueprintId.Value}:{requirement.ActivityType}:{requirement.FacilityName}:{requirement.DependencyStage}:{index + 1}";
-                productionJobCompletionStates.TryGetValue(stableKey, out var state);
-                var row = new PlannedProductionJobRow(
-                    stableKey,
-                    requirement.SourceProductName,
-                    requirement.ProductName,
-                    requirement.BlueprintName,
-                    requirement.ActivityType,
-                    requirement.FacilityName,
-                    requirement.ParentProductName,
-                    requirement.RequiredQuantity,
-                    requirement.OutputQuantityPerRun,
-                    requirement.TotalRuns,
-                    requirement.DependencyStage,
-                    index + 1,
-                    jobCount,
-                    runs,
-                    requirement.TimePerRun,
-                    duration,
-                    requirement.Depth,
-                    OnProductionJobCompletionChanged);
-                row.ApplyState(state?.IsCompleted ?? false, state?.CompletedAt, state?.Notes ?? string.Empty);
+                var runsPerJob = requirement.ParentProductName.Length == 0
+                    ? requirement.TotalRuns
+                    : CalculateRunsPerJob(
+                        requirement.TotalRuns,
+                        requirement.TimePerRun,
+                        TimeSpan.FromHours((double)(requirement.ActivityType == BlueprintActivityType.Reaction
+                            ? MaxReactionJobHours
+                            : MaxManufacturingJobHours)));
+                var jobCount = (int)Math.Ceiling(requirement.TotalRuns / (decimal)runsPerJob);
 
-                rows.Add(row);
-            }
+                return Enumerable.Range(0, jobCount)
+                    .Select(index =>
+                    {
+                        var runs = Math.Min(runsPerJob, requirement.TotalRuns - index * runsPerJob);
+                        return new ExpandedProductionJobRequirement(
+                            requirement,
+                            runs,
+                            TimeSpan.FromTicks(requirement.TimePerRun.Ticks * runs),
+                            index);
+                    });
+            })
+            .ToList();
+
+        var jobCounters = new Dictionary<string, int>(StringComparer.Ordinal);
+        var jobCounts = expandedRequirements
+            .GroupBy(expanded => GetProductionJobGroupKey(expanded.Requirement), StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal);
+
+        foreach (var expanded in expandedRequirements)
+        {
+            var requirement = expanded.Requirement;
+            var groupKey = GetProductionJobGroupKey(requirement);
+            jobCounters.TryGetValue(groupKey, out var currentIndex);
+            currentIndex++;
+            jobCounters[groupKey] = currentIndex;
+
+            var stableKey = $"{requirement.BlueprintId.Value}:{requirement.ActivityType}:{requirement.FacilityName}:{requirement.DependencyStage}:{requirement.MaxRunsPerJob}:{requirement.SplitGroupIndex}:{requirement.JobIndex}:{expanded.SplitIndex}";
+            productionJobCompletionStates.TryGetValue(stableKey, out var state);
+            var row = new PlannedProductionJobRow(
+                stableKey,
+                requirement.SourceProductName,
+                requirement.ProductName,
+                requirement.BlueprintName,
+                requirement.ActivityType,
+                requirement.FacilityName,
+                requirement.ParentProductName,
+                requirement.RequiredQuantity,
+                requirement.OutputQuantityPerRun,
+                requirement.TotalRuns,
+                requirement.DependencyStage,
+                currentIndex,
+                jobCounts[groupKey],
+                expanded.Runs,
+                requirement.TimePerRun,
+                expanded.Duration,
+                requirement.Depth,
+                OnProductionJobCompletionChanged);
+            row.ApplyState(state?.IsCompleted ?? false, state?.CompletedAt, state?.Notes ?? string.Empty);
+
+            rows.Add(row);
         }
 
         AssignExecutionWaves(rows);
@@ -1968,6 +2044,22 @@ public sealed class MainWindowViewModel : ObservableObject
         return applyFilter
             ? rows.Where(JobMatchesFilter)
             : rows;
+    }
+
+    private static string GetProductionJobGroupKey(AggregatedProductionJobRequirement requirement)
+    {
+        return $"{requirement.SourceProductName}|{requirement.BlueprintId.Value}|{requirement.ActivityType}|{requirement.FacilityName}|{requirement.DependencyStage}|{requirement.ProductName}";
+    }
+
+    private static int CalculateRunsPerJob(int totalRuns, TimeSpan timePerRun, TimeSpan maxJobDuration)
+    {
+        if (totalRuns <= 1 || timePerRun <= TimeSpan.Zero)
+        {
+            return Math.Max(1, totalRuns);
+        }
+
+        var runsByDuration = (int)Math.Floor(maxJobDuration.TotalSeconds / timePerRun.TotalSeconds);
+        return Math.Clamp(runsByDuration, 1, totalRuns);
     }
 
     private void AssignExecutionWaves(IReadOnlyList<PlannedProductionJobRow> rows)
@@ -2007,6 +2099,7 @@ public sealed class MainWindowViewModel : ObservableObject
             row.CompletedAt,
             row.Notes);
         OnPropertyChanged(nameof(ProductionJobPlanSummaryText));
+        OnPropertyChanged(nameof(ProductionJobPlanWarningsText));
     }
 
     private bool JobMatchesFilter(PlannedProductionJobRow row)
@@ -2019,15 +2112,68 @@ public sealed class MainWindowViewModel : ObservableObject
         };
     }
 
-    private static int CalculateRunsPerJob(int totalRuns, TimeSpan timePerRun, TimeSpan maxJobDuration)
+    private IReadOnlyList<ManufacturingResult> GetProductionLedgerResults(ProductionLedgerEntry entry)
     {
-        if (totalRuns <= 1 || timePerRun <= TimeSpan.Zero)
+        return productionLedgerSplitResults.TryGetValue(entry.Id, out var splitResults)
+            ? splitResults
+            : [entry.Result];
+    }
+
+    private async Task RecalculateProductionLedgerPlanningAsync()
+    {
+        if (ProductionLedgerEntries.Count == 0)
         {
-            return Math.Max(1, totalRuns);
+            return;
         }
 
-        var runsByDuration = (int)Math.Floor(maxJobDuration.TotalSeconds / timePerRun.TotalSeconds);
-        return Math.Clamp(runsByDuration, 1, totalRuns);
+        IsBusy = true;
+        StatusText = "Recalculating production ledger";
+
+        try
+        {
+            productionLedgerSplitResults.Clear();
+            foreach (var entry in ProductionLedgerEntries)
+            {
+                if (entry.MaxRunsPerJob <= 0 || entry.Runs <= entry.MaxRunsPerJob)
+                {
+                    continue;
+                }
+
+                var splitResults = new List<ManufacturingResult>();
+                for (var lineIndex = 0; lineIndex < entry.Lines; lineIndex++)
+                {
+                    var remainingRuns = entry.Runs;
+                    while (remainingRuns > 0)
+                    {
+                        var chunkRuns = Math.Min(entry.MaxRunsPerJob, remainingRuns);
+                        var chunkAdditionalCosts = entry.Result.AdditionalCosts * chunkRuns / (entry.Runs * entry.Lines);
+                        splitResults.Add(await calculator.CalculateAsync(
+                            CreateManufacturingRequest(
+                                new BlueprintId(entry.BlueprintId),
+                                chunkRuns,
+                                1,
+                                entry.MaterialEfficiency,
+                                entry.TimeEfficiency,
+                                chunkAdditionalCosts),
+                            CancellationToken.None));
+                        remainingRuns -= chunkRuns;
+                    }
+                }
+
+                productionLedgerSplitResults[entry.Id] = splitResults;
+            }
+
+            RefreshProductionLedger();
+            StatusText = "Production ledger recalculated";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Could not recalculate production ledger: {ex.Message}";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
     }
 
     private static TimeSpan EstimateCalendarTime(IEnumerable<PlannedProductionJobRow> rows, int parallelJobs)
@@ -2066,6 +2212,38 @@ public sealed class MainWindowViewModel : ObservableObject
         }
 
         return total;
+    }
+
+    private static IReadOnlyList<string> BuildProductionDependencyWarnings(IReadOnlyList<PlannedProductionJobRow> rows)
+    {
+        if (rows.Count == 0)
+        {
+            return [];
+        }
+
+        var parentRows = rows
+            .Where(row => row.ParentProductName.Length == 0)
+            .GroupBy(row => (row.SourceProductName, row.ProductName))
+            .ToDictionary(group => group.Key, group => group.Min(row => row.Wave));
+        var warnings = new List<string>();
+
+        foreach (var componentGroup in rows
+                     .Where(row => row.ParentProductName.Length > 0)
+                     .GroupBy(row => (row.SourceProductName, row.ParentProductName, row.ProductName)))
+        {
+            if (!parentRows.TryGetValue((componentGroup.Key.SourceProductName, componentGroup.Key.ParentProductName), out var parentWave))
+            {
+                continue;
+            }
+
+            var latestComponentWave = componentGroup.Max(row => row.Wave);
+            if (latestComponentWave >= parentWave)
+            {
+                warnings.Add($"{componentGroup.Key.ProductName} for {componentGroup.Key.ParentProductName} finishes in wave {latestComponentWave:N0}, parent starts in wave {parentWave:N0}.");
+            }
+        }
+
+        return warnings;
     }
 
     private void RaiseCommandStates()
@@ -2122,7 +2300,7 @@ public sealed class MainWindowViewModel : ObservableObject
             saveCommand.RaiseCanExecuteChanged();
         }
 
-        if (RecalculateProductionPlanCommand is RelayCommand recalculateCommand)
+        if (RecalculateProductionPlanCommand is AsyncRelayCommand recalculateCommand)
         {
             recalculateCommand.RaiseCanExecuteChanged();
         }
@@ -2196,7 +2374,8 @@ public sealed class MainWindowViewModel : ObservableObject
             [
                 $"{entry.OutputText}",
                 $"Added: {entry.AddedAt.LocalDateTime:g}",
-                $"Runs: {entry.Runs:N0} / ME {entry.MaterialEfficiency} / TE {entry.TimeEfficiency}",
+                $"Runs/job: {entry.Runs:N0} / Lines: {entry.Lines:N0} / ME {entry.MaterialEfficiency} / TE {entry.TimeEfficiency}",
+                $"Max runs per final job: {(entry.MaxRunsPerJob > 0 ? entry.MaxRunsPerJob.ToString("N0") : "unlimited")}",
                 $"Markets: buy {entry.MaterialMarketName} / sell {entry.ProductMarketName}",
                 $"Facilities: final {entry.FinalProductFacilityName} / components {entry.ComponentFacilityName} / reactions {entry.ReactionFacilityName}",
                 string.Empty,
@@ -2925,24 +3104,64 @@ public sealed class MainWindowViewModel : ObservableObject
         }
     }
 
-    public sealed record ProductionLedgerEntry(
-        Guid Id,
-        DateTimeOffset AddedAt,
-        long BlueprintId,
-        string BlueprintName,
-        string ProductName,
-        int Runs,
-        int MaterialEfficiency,
-        int TimeEfficiency,
-        string MaterialMarketName,
-        string ProductMarketName,
-        string FinalProductFacilityName,
-        string ComponentFacilityName,
-        string ReactionFacilityName,
-        ManufacturingResult Result)
+    public sealed class ProductionLedgerEntry
     {
+        public ProductionLedgerEntry()
+        {
+        }
+
+        public ProductionLedgerEntry(
+            Guid id,
+            DateTimeOffset addedAt,
+            long blueprintId,
+            string blueprintName,
+            string productName,
+            int runs,
+            int lines,
+            int materialEfficiency,
+            int timeEfficiency,
+            string materialMarketName,
+            string productMarketName,
+            string finalProductFacilityName,
+            string componentFacilityName,
+            string reactionFacilityName,
+            ManufacturingResult result)
+        {
+            Id = id;
+            AddedAt = addedAt;
+            BlueprintId = blueprintId;
+            BlueprintName = blueprintName;
+            ProductName = productName;
+            Runs = runs;
+            Lines = lines;
+            MaterialEfficiency = materialEfficiency;
+            TimeEfficiency = timeEfficiency;
+            MaterialMarketName = materialMarketName;
+            ProductMarketName = productMarketName;
+            FinalProductFacilityName = finalProductFacilityName;
+            ComponentFacilityName = componentFacilityName;
+            ReactionFacilityName = reactionFacilityName;
+            Result = result;
+        }
+
+        public Guid Id { get; set; }
+        public DateTimeOffset AddedAt { get; set; }
+        public long BlueprintId { get; set; }
+        public string BlueprintName { get; set; } = string.Empty;
+        public string ProductName { get; set; } = string.Empty;
+        public int Runs { get; set; }
+        public int Lines { get; set; } = 1;
+        public int MaterialEfficiency { get; set; }
+        public int TimeEfficiency { get; set; }
+        public string MaterialMarketName { get; set; } = string.Empty;
+        public string ProductMarketName { get; set; } = string.Empty;
+        public string FinalProductFacilityName { get; set; } = string.Empty;
+        public string ComponentFacilityName { get; set; } = string.Empty;
+        public string ReactionFacilityName { get; set; } = string.Empty;
+        public ManufacturingResult Result { get; set; } = new();
+        public int MaxRunsPerJob { get; set; }
         public string OutputText => $"{Result.OutputQuantity:N0} x {ProductName}";
-        public string SummaryText => $"{Runs:N0} runs / cost {Result.TotalCost:N2} ISK / profit {Result.Profit:N2} ISK";
+        public string SummaryText => $"{Runs:N0} runs/job x {Lines:N0} lines / cost {Result.TotalCost:N2} ISK / profit {Result.Profit:N2} ISK{(MaxRunsPerJob > 0 ? $" / max {MaxRunsPerJob:N0} runs/job" : string.Empty)}";
     }
 
     public sealed record MarketScannerResultRow(
@@ -2963,10 +3182,39 @@ public sealed class MainWindowViewModel : ObservableObject
         decimal IskPerHour,
         TimeSpan ProductionTime,
         int WarningCount,
+        int MissingPriceCount,
+        int LowVolumeCount,
         string Error = "")
     {
         public string ProductionTimeText => FormatDuration(ProductionTime);
-        public string Status => Error.Length > 0 ? Error : WarningCount > 0 ? $"{WarningCount:N0} warnings" : "OK";
+        public string Status
+        {
+            get
+            {
+                if (Error.Length > 0)
+                {
+                    return Error;
+                }
+
+                var issues = new List<string>();
+                if (MissingPriceCount > 0)
+                {
+                    issues.Add($"{MissingPriceCount:N0} missing price");
+                }
+
+                if (LowVolumeCount > 0)
+                {
+                    issues.Add($"{LowVolumeCount:N0} low volume");
+                }
+
+                if (WarningCount > MissingPriceCount + LowVolumeCount)
+                {
+                    issues.Add($"{WarningCount - MissingPriceCount - LowVolumeCount:N0} warnings");
+                }
+
+                return issues.Count == 0 ? "OK" : string.Join(", ", issues);
+            }
+        }
     }
 
     private sealed record MarketScannerCacheEntry(DateTimeOffset CreatedAt, IReadOnlyList<MarketScannerResultRow> Rows);
@@ -2975,7 +3223,10 @@ public sealed class MainWindowViewModel : ObservableObject
         Guid SourceEntryId,
         string SourceProductName,
         ProductionJobRequirement Requirement,
-        int DependencyStage);
+        int DependencyStage,
+        int MaxRunsPerJob,
+        int SplitGroupIndex,
+        int JobIndex);
 
     private sealed record AggregatedProductionJobRequirement(
         string SourceProductName,
@@ -2991,7 +3242,16 @@ public sealed class MainWindowViewModel : ObservableObject
         int TotalRuns,
         TimeSpan TimePerRun,
         int DependencyStage,
-        int Depth);
+        int Depth,
+        int MaxRunsPerJob,
+        int SplitGroupIndex,
+        int JobIndex);
+
+    private sealed record ExpandedProductionJobRequirement(
+        AggregatedProductionJobRequirement Requirement,
+        int Runs,
+        TimeSpan Duration,
+        int SplitIndex);
 
     public sealed class PlannedProductionJobRow
     {

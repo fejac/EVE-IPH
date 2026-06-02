@@ -115,16 +115,21 @@
                                             <ColumnDefinition Width="*" />
                                             <ColumnDefinition Width="*" />
                                             <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="*" />
                                         </Grid.ColumnDefinitions>
                                         <StackPanel Grid.Column="0" Margin="0,0,8,0">
-                                            <TextBlock Text="Runs" FontSize="12" Foreground="#526176" />
+                                            <TextBlock Text="Runs / Job" FontSize="12" Foreground="#526176" />
                                             <TextBox Text="{Binding Runs, UpdateSourceTrigger=PropertyChanged}" />
                                         </StackPanel>
                                         <StackPanel Grid.Column="1" Margin="0,0,8,0">
+                                            <TextBlock Text="Lines" FontSize="12" Foreground="#526176" />
+                                            <TextBox Text="{Binding Lines, UpdateSourceTrigger=PropertyChanged}" />
+                                        </StackPanel>
+                                        <StackPanel Grid.Column="2" Margin="0,0,8,0">
                                             <TextBlock Text="ME" FontSize="12" Foreground="#526176" />
                                             <TextBox Text="{Binding MaterialEfficiency, UpdateSourceTrigger=PropertyChanged}" />
                                         </StackPanel>
-                                        <StackPanel Grid.Column="2">
+                                        <StackPanel Grid.Column="3">
                                             <TextBlock Text="TE" FontSize="12" Foreground="#526176" />
                                             <TextBox Text="{Binding TimeEfficiency, UpdateSourceTrigger=PropertyChanged}" />
                                         </StackPanel>
@@ -133,6 +138,11 @@
                                     <StackPanel Margin="0,10,0,0">
                                         <TextBlock Text="Additional Costs" FontSize="12" Foreground="#526176" />
                                         <TextBox Text="{Binding AdditionalCosts, UpdateSourceTrigger=PropertyChanged, StringFormat=N2}" />
+                                    </StackPanel>
+
+                                    <StackPanel Margin="0,10,0,0">
+                                        <TextBlock Text="Final Max Runs/Job" FontSize="12" Foreground="#526176" />
+                                        <TextBox Text="{Binding FinalMaxRunsPerJob, UpdateSourceTrigger=PropertyChanged}" />
                                     </StackPanel>
 
                                     <Grid Margin="0,10,0,0">
@@ -288,7 +298,13 @@
                                     <RowDefinition Height="Auto" />
                                     <RowDefinition Height="*" />
                                 </Grid.RowDefinitions>
-                                <TextBlock Text="Materials" FontSize="16" FontWeight="SemiBold" Margin="0,0,0,10" />
+                                <DockPanel Margin="0,0,0,10">
+                                    <TextBlock Text="Materials" FontSize="16" FontWeight="SemiBold" DockPanel.Dock="Left" />
+                                    <TextBlock Text="{Binding MaterialAuditSummaryText}"
+                                               Foreground="#526176"
+                                               FontSize="12"
+                                               HorizontalAlignment="Right" />
+                                </DockPanel>
                                 <DataGrid Grid.Row="1"
                                           ItemsSource="{Binding Materials}"
                                           AutoGenerateColumns="False"
@@ -302,6 +318,8 @@
                                         <DataGridTextColumn Header="Unit Price" Binding="{Binding UnitPrice, StringFormat=N2}" Width="120" />
                                         <DataGridTextColumn Header="Total" Binding="{Binding TotalPrice, StringFormat=N2}" Width="130" />
                                         <DataGridTextColumn Header="Volume" Binding="{Binding TotalVolume, StringFormat=N2}" Width="110" />
+                                        <DataGridTextColumn Header="Market" Binding="{Binding MarketStatus}" Width="130" />
+                                        <DataGridTextColumn Header="Calculation" Binding="{Binding CalculationText}" Width="360" />
                                     </DataGrid.Columns>
                                 </DataGrid>
                             </Grid>
@@ -516,6 +534,7 @@
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto" />
                                     <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
                                     <RowDefinition Height="*" />
                                 </Grid.RowDefinitions>
 
@@ -524,7 +543,6 @@
                                         <ColumnDefinition Width="150" />
                                         <ColumnDefinition Width="130" />
                                         <ColumnDefinition Width="130" />
-                                        <ColumnDefinition Width="150" />
                                         <ColumnDefinition Width="150" />
                                         <ColumnDefinition Width="150" />
                                         <ColumnDefinition Width="150" />
@@ -569,7 +587,13 @@
                                            Foreground="#526176"
                                            Margin="0,8,0,8" />
 
-                                <DataGrid Grid.Row="2"
+                                <TextBlock Grid.Row="2"
+                                           Text="{Binding ProductionJobPlanWarningsText}"
+                                           Foreground="#9a5b00"
+                                           TextWrapping="Wrap"
+                                           Margin="0,0,0,8" />
+
+                                <DataGrid Grid.Row="3"
                                           ItemsSource="{Binding ProductionJobPlanRows}"
                                           AutoGenerateColumns="False"
                                           CanUserAddRows="False"
@@ -597,19 +621,26 @@
                         </Border>
 
                         <Grid Grid.Row="2">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="14" />
-                                <ColumnDefinition Width="360" />
-                            </Grid.ColumnDefinitions>
-
-                            <Border Grid.Column="0" Style="{StaticResource PanelBorder}">
+                            <Border Style="{StaticResource PanelBorder}">
                                 <Grid>
                                     <Grid.RowDefinitions>
                                         <RowDefinition Height="Auto" />
                                         <RowDefinition Height="*" />
                                     </Grid.RowDefinitions>
-                                    <TextBlock Text="Combined Materials" FontSize="16" FontWeight="SemiBold" Margin="0,0,0,8" />
+                                    <DockPanel Margin="0,0,0,8">
+                                        <TextBlock Text="Combined Materials" FontSize="16" FontWeight="SemiBold" DockPanel.Dock="Left" />
+                                        <Button Content="Use Assets"
+                                                Width="92"
+                                                HorizontalAlignment="Right"
+                                                Command="{Binding UseProductionAssetsCommand}"
+                                                DockPanel.Dock="Right" />
+                                        <Button Content="Copy"
+                                                Width="80"
+                                                Margin="0,0,8,0"
+                                                HorizontalAlignment="Right"
+                                                Command="{Binding CopyProductionShoppingListCommand}"
+                                                DockPanel.Dock="Right" />
+                                    </DockPanel>
                                     <DataGrid Grid.Row="1"
                                               ItemsSource="{Binding ProductionLedgerMaterials}"
                                               AutoGenerateColumns="False"
@@ -623,35 +654,6 @@
                                             <DataGridTextColumn Header="Estimated Cost" Binding="{Binding EstimatedCost, StringFormat=N2}" Width="140" />
                                         </DataGrid.Columns>
                                     </DataGrid>
-                                </Grid>
-                            </Border>
-
-                            <Border Grid.Column="2" Style="{StaticResource PanelBorder}">
-                                <Grid>
-                                    <Grid.RowDefinitions>
-                                        <RowDefinition Height="Auto" />
-                                        <RowDefinition Height="*" />
-                                    </Grid.RowDefinitions>
-                                    <DockPanel Margin="0,0,0,8">
-                                        <TextBlock Text="Combined Shopping List" FontSize="16" FontWeight="SemiBold" DockPanel.Dock="Left" />
-                                        <Button Content="Use Assets"
-                                                Width="92"
-                                                HorizontalAlignment="Right"
-                                                Command="{Binding UseProductionAssetsCommand}"
-                                                DockPanel.Dock="Right" />
-                                        <Button Content="Copy"
-                                                Width="80"
-                                                Margin="0,0,8,0"
-                                                HorizontalAlignment="Right"
-                                                DockPanel.Dock="Right"
-                                                Command="{Binding CopyProductionShoppingListCommand}" />
-                                    </DockPanel>
-                                    <TextBox Grid.Row="1"
-                                             Text="{Binding ProductionLedgerShoppingListText, Mode=OneWay}"
-                                             AcceptsReturn="True"
-                                             IsReadOnly="True"
-                                             FontFamily="Consolas"
-                                             VerticalScrollBarVisibility="Auto" />
                                 </Grid>
                             </Border>
                         </Grid>

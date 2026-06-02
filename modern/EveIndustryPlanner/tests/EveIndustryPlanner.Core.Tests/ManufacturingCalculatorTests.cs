@@ -21,6 +21,69 @@ public sealed class ManufacturingCalculatorTests
     }
 
     [Fact]
+    public void MaterialQuantity_RoundsOnceForWholeJob()
+    {
+        var singleRun = ManufacturingCalculator.CalculateMaterialQuantity(11, runs: 1, materialEfficiency: 10, facilityMaterialMultiplier: 1m);
+        var tenRuns = ManufacturingCalculator.CalculateMaterialQuantity(11, runs: 10, materialEfficiency: 10, facilityMaterialMultiplier: 1m);
+
+        Assert.Equal(10, singleRun);
+        Assert.Equal(99, tenRuns);
+    }
+
+    [Fact]
+    public void MaterialBreakdown_ExposesWholeJobRounding()
+    {
+        var breakdown = ManufacturingCalculator.CalculateMaterialBreakdown(11, runs: 10, lines: 2, materialEfficiency: 10, facilityMaterialMultiplier: 0.99m);
+
+        Assert.Equal(11, breakdown.BaseQuantity);
+        Assert.Equal(10, breakdown.RunsPerJob);
+        Assert.Equal(2, breakdown.Lines);
+        Assert.Equal(0.90m, breakdown.BlueprintMaterialMultiplier);
+        Assert.Equal(0.99m, breakdown.FacilityMaterialMultiplier);
+        Assert.Equal(98.01m, breakdown.RawQuantityPerJob);
+        Assert.Equal(98.01m, breakdown.RoundedQuantityPerJob);
+        Assert.Equal(99, breakdown.QuantityPerJob);
+        Assert.Equal(198, breakdown.TotalQuantity);
+    }
+
+    [Fact]
+    public void MaterialQuantity_NeverFallsBelowRuns()
+    {
+        var quantity = ManufacturingCalculator.CalculateMaterialQuantity(1, runs: 10, materialEfficiency: 10, facilityMaterialMultiplier: 1m);
+
+        Assert.Equal(10, quantity);
+    }
+
+    [Fact]
+    public async Task CalculateAsync_LinesRoundMaterialsPerJob()
+    {
+        var calculator = new ManufacturingCalculator(new LineRoundingRepository(), new LineRoundingPriceProvider());
+
+        var oneTenRunJob = await calculator.CalculateAsync(new ManufacturingRequest
+        {
+            BlueprintId = new BlueprintId(50),
+            Runs = 10,
+            Lines = 1,
+            MaterialEfficiency = 10,
+            TimeEfficiency = 0,
+            Facility = FacilityProfile.None
+        }, CancellationToken.None);
+        var tenOneRunJobs = await calculator.CalculateAsync(new ManufacturingRequest
+        {
+            BlueprintId = new BlueprintId(50),
+            Runs = 1,
+            Lines = 10,
+            MaterialEfficiency = 10,
+            TimeEfficiency = 0,
+            Facility = FacilityProfile.None
+        }, CancellationToken.None);
+
+        Assert.Equal(99, Assert.Single(oneTenRunJob.Materials).Quantity);
+        Assert.Equal(100, Assert.Single(tenOneRunJobs.Materials).Quantity);
+        Assert.Equal(10, tenOneRunJobs.OutputQuantity);
+    }
+
+    [Fact]
     public async Task CalculateAsync_ReturnsExpectedSampleBlueprintResult()
     {
         var calculator = new ManufacturingCalculator(new SampleBlueprintRepository(), new SampleMarketPriceProvider());
@@ -142,6 +205,34 @@ public sealed class ManufacturingCalculatorTests
         Assert.Equal(190, material.Quantity);
         Assert.Equal(901_000m / 190m, material.UnitPrice);
         Assert.Equal(901_000m, material.TotalPrice);
+        Assert.True(material.HasEnoughMarketVolume);
+        Assert.Equal(190, material.MarketFilledQuantity);
+        Assert.Equal(190, material.Calculation.TotalQuantity);
+    }
+
+    [Fact]
+    public async Task CalculateAsync_InstantBuyMarksInsufficientOrderBookVolume()
+    {
+        var calculator = new ManufacturingCalculator(new VolumeAwareRepository(), new VolumeAwarePriceProvider(filledQuantity: 10));
+
+        var result = await calculator.CalculateAsync(new ManufacturingRequest
+        {
+            BlueprintId = new BlueprintId(10),
+            Runs = 1,
+            MaterialEfficiency = 0,
+            TimeEfficiency = 0,
+            Facility = FacilityProfile.None,
+            PriceProfile = new PriceProfile
+            {
+                MaterialPriceSelection = MarketPriceSelection.InstantBuy,
+                ProductPriceSelection = MarketPriceSelection.SellOrder
+            }
+        }, CancellationToken.None);
+
+        var material = Assert.Single(result.Materials);
+        Assert.False(material.HasEnoughMarketVolume);
+        Assert.Equal(10, material.MarketFilledQuantity);
+        Assert.Contains(result.Warnings, warning => warning.Contains("available for Volume Material instant buy pricing", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -413,6 +504,13 @@ public sealed class ManufacturingCalculatorTests
 
     private sealed class VolumeAwarePriceProvider : IMarketPriceProvider, IMarketOrderBookProvider
     {
+        private readonly long? filledQuantity;
+
+        public VolumeAwarePriceProvider(long? filledQuantity = null)
+        {
+            this.filledQuantity = filledQuantity;
+        }
+
         public Task<MarketPrice?> GetPriceAsync(TypeId typeId, PriceProfile profile, CancellationToken cancellationToken)
         {
             return Task.FromResult<MarketPrice?>(new MarketPrice
@@ -430,8 +528,55 @@ public sealed class ManufacturingCalculatorTests
             {
                 UnitPrice = totalPrice / quantity,
                 TotalPrice = totalPrice,
-                FilledQuantity = quantity,
+                FilledQuantity = filledQuantity ?? quantity,
                 RequestedQuantity = quantity
+            });
+        }
+    }
+
+    private sealed class LineRoundingRepository : IBlueprintRepository
+    {
+        private readonly BlueprintDefinition blueprint = new()
+        {
+            BlueprintId = new BlueprintId(50),
+            ProductTypeId = new TypeId(51),
+            ProductName = "Rounded Product",
+            BlueprintName = "Rounded Product Blueprint",
+            ProductQuantity = 1,
+            BaseProductionTime = TimeSpan.FromMinutes(1),
+            Materials =
+            [
+                new BlueprintMaterial { TypeId = new TypeId(52), Name = "Rounded Material", Quantity = 11, Volume = 1, Category = MaterialCategory.Raw }
+            ]
+        };
+
+        public Task<IReadOnlyList<BlueprintSearchResult>> SearchAsync(string query, CancellationToken cancellationToken)
+        {
+            return Task.FromResult<IReadOnlyList<BlueprintSearchResult>>([]);
+        }
+
+        public Task<BlueprintDefinition?> GetBlueprintAsync(BlueprintId blueprintId, CancellationToken cancellationToken)
+        {
+            return Task.FromResult<BlueprintDefinition?>(blueprintId == blueprint.BlueprintId ? blueprint : null);
+        }
+
+        public Task<BlueprintDefinition?> GetBlueprintByProductTypeAsync(TypeId productTypeId, CancellationToken cancellationToken)
+        {
+            return Task.FromResult<BlueprintDefinition?>(null);
+        }
+    }
+
+    private sealed class LineRoundingPriceProvider : IMarketPriceProvider
+    {
+        public Task<MarketPrice?> GetPriceAsync(TypeId typeId, PriceProfile profile, CancellationToken cancellationToken)
+        {
+            return Task.FromResult<MarketPrice?>(new MarketPrice
+            {
+                TypeId = typeId,
+                BuyPrice = 1,
+                SellPrice = 1,
+                BuyMaxPrice = 1,
+                SellMinPrice = 1
             });
         }
     }
