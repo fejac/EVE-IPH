@@ -1,7 +1,7 @@
 services:
   pocketbase:
     build:
-      context: .
+      context: ./deploy/pocketbase
       dockerfile: Dockerfile
       args:
         PB_VERSION: ${PB_VERSION:-latest}
