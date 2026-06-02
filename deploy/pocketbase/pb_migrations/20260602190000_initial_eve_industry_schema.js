@@ -140,7 +140,7 @@ migrate((app) => {
       }
     ],
     indexes: [
-      "CREATE INDEX idx_production_ledgers_user_updated ON production_ledgers (user, updated)"
+      "CREATE INDEX idx_production_ledgers_user ON production_ledgers (user)"
     ]
   }));
 
