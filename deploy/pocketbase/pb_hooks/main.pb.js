@@ -1,40 +1,47 @@
 const EVE_TOKEN_URL = "https://login.eveonline.com/v2/oauth/token";
 
 routerAdd("POST", "/api/eve-industry/auth/eve/callback", (e) => {
-  const body = e.requestInfo().body || {};
-  const code = stringValue(body.code);
-  const codeVerifier = stringValue(body.code_verifier);
-  const redirectUri = stringValue(body.redirect_uri) || $os.getenv("EVE_SSO_REDIRECT_URI");
-  const clientId = $os.getenv("EVE_SSO_CLIENT_ID");
-  const clientSecret = $os.getenv("EVE_SSO_CLIENT_SECRET");
-  const tokenEncryptionKey = $os.getenv("TOKEN_ENCRYPTION_KEY");
+  try {
+    const body = e.requestInfo().body || {};
+    const code = stringValue(body.code);
+    const codeVerifier = stringValue(body.code_verifier);
+    const redirectUri = stringValue(body.redirect_uri) || $os.getenv("EVE_SSO_REDIRECT_URI");
+    const clientId = $os.getenv("EVE_SSO_CLIENT_ID");
+    const clientSecret = $os.getenv("EVE_SSO_CLIENT_SECRET");
+    const tokenEncryptionKey = $os.getenv("TOKEN_ENCRYPTION_KEY");
 
-  if (!code) {
-    throw new BadRequestError("Missing EVE SSO authorization code.");
+    if (!code) {
+      return e.json(400, { error: "missing_code", message: "Missing EVE SSO authorization code." });
+    }
+
+    if (!redirectUri) {
+      return e.json(400, { error: "missing_redirect_uri", message: "Missing EVE SSO redirect URI." });
+    }
+
+    if (!clientId) {
+      return e.json(400, { error: "missing_client_id", message: "Server is missing EVE_SSO_CLIENT_ID." });
+    }
+
+    if (!tokenEncryptionKey || tokenEncryptionKey.length !== 32) {
+      return e.json(400, { error: "invalid_token_key", message: "Server TOKEN_ENCRYPTION_KEY must be exactly 32 characters." });
+    }
+
+    const eveToken = exchangeEveAuthorizationCode(code, codeVerifier, redirectUri, clientId, clientSecret);
+    const identity = readEveIdentity(eveToken.access_token);
+    const authUser = resolvePocketBaseUser(e, identity);
+    const eveAccount = upsertEveAccount(authUser, identity, eveToken, tokenEncryptionKey);
+
+    return e.json(200, {
+      token: authUser.newAuthToken(),
+      record: authUser.publicExport(),
+      eve_account: eveAccount.publicExport(),
+    });
+  } catch (err) {
+    return e.json(400, {
+      error: "eve_auth_failed",
+      message: String(err && err.message ? err.message : err),
+    });
   }
-
-  if (!redirectUri) {
-    throw new BadRequestError("Missing EVE SSO redirect URI.");
-  }
-
-  if (!clientId) {
-    throw new BadRequestError("Server is missing EVE_SSO_CLIENT_ID.");
-  }
-
-  if (!tokenEncryptionKey || tokenEncryptionKey.length !== 32) {
-    throw new BadRequestError("Server TOKEN_ENCRYPTION_KEY must be exactly 32 characters.");
-  }
-
-  const eveToken = exchangeEveAuthorizationCode(code, codeVerifier, redirectUri, clientId, clientSecret);
-  const identity = readEveIdentity(eveToken.access_token);
-  const authUser = resolvePocketBaseUser(e, identity);
-  const eveAccount = upsertEveAccount(authUser, identity, eveToken, tokenEncryptionKey);
-
-  return e.json(200, {
-    token: authUser.newAuthToken(),
-    record: authUser.publicExport(),
-    eve_account: eveAccount.publicExport(),
-  });
 });
 
 function exchangeEveAuthorizationCode(code, codeVerifier, redirectUri, clientId, clientSecret) {
@@ -49,7 +56,7 @@ function exchangeEveAuthorizationCode(code, codeVerifier, redirectUri, clientId,
     form.code_verifier = codeVerifier;
   }
 
-  if (clientSecret) {
+  if (!codeVerifier && clientSecret) {
     form.client_secret = clientSecret;
   }
 
@@ -64,7 +71,7 @@ function exchangeEveAuthorizationCode(code, codeVerifier, redirectUri, clientId,
   });
 
   if (response.statusCode < 200 || response.statusCode >= 300) {
-    throw new BadRequestError("EVE SSO token exchange failed.");
+    throw new BadRequestError("EVE SSO token exchange failed: " + String(response.raw || response.body || response.statusCode));
   }
 
   if (!response.json || !response.json.access_token) {

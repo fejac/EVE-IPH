@@ -160,11 +160,13 @@ public sealed class EveSsoCharacterAuthService
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", pocketBaseAuthToken);
         }
 
-        using var response = await httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
+        using var response = await httpClient.SendAsync(request, linkedCancellation.Token).ConfigureAwait(false);
         var responseText = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
         {
-            throw new InvalidOperationException($"PocketBase EVE SSO exchange failed: {responseText}");
+            throw new InvalidOperationException($"PocketBase EVE SSO exchange failed: {ExtractPocketBaseError(responseText)}");
         }
 
         using var json = JsonDocument.Parse(responseText);
@@ -317,6 +319,29 @@ public sealed class EveSsoCharacterAuthService
                 .ToList(),
             _ => []
         };
+    }
+
+    private static string ExtractPocketBaseError(string responseText)
+    {
+        if (string.IsNullOrWhiteSpace(responseText))
+        {
+            return "Empty server response.";
+        }
+
+        try
+        {
+            using var json = JsonDocument.Parse(responseText);
+            var root = json.RootElement;
+            if (root.TryGetProperty("message", out var message))
+            {
+                return message.GetString() ?? responseText;
+            }
+        }
+        catch (JsonException)
+        {
+        }
+
+        return responseText;
     }
 
     private static AuthenticationHeaderValue CreateBasicAuthorizationHeader()
