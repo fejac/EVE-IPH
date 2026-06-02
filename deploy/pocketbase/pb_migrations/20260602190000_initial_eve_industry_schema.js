@@ -8,21 +8,6 @@ migrate((app) => {
   users.createRule = null;
   users.updateRule = userOwnRule;
   users.deleteRule = userOwnRule;
-  users.fields.add({
-    name: "display_name",
-    type: "text",
-    max: 120,
-    presentable: true
-  });
-  users.fields.add({
-    name: "primary_character_id",
-    type: "text",
-    max: 32
-  });
-  users.indexes = [
-    ...(users.indexes || []),
-    "CREATE UNIQUE INDEX idx_users_primary_character_id ON users (primary_character_id) WHERE primary_character_id != ''"
-  ];
   app.save(users);
 
   function ownedRelationField() {
@@ -213,9 +198,6 @@ migrate((app) => {
     users.createRule = null;
     users.updateRule = null;
     users.deleteRule = null;
-    users.fields.removeByName("display_name");
-    users.fields.removeByName("primary_character_id");
-    users.indexes = (users.indexes || []).filter((index) => !index.includes("idx_users_primary_character_id"));
     app.save(users);
   } catch (_) {
   }
