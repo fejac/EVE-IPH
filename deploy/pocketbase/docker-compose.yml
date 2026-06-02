@@ -1,6 +1,10 @@
 services:
   pocketbase:
-    image: ghcr.io/muchobien/pocketbase:${PB_VERSION:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PB_VERSION: ${PB_VERSION:-latest}
     container_name: eve-industry-pocketbase
     restart: unless-stopped
     ports:
@@ -19,8 +23,6 @@ services:
     command: ["--encryptionEnv", "ENCRYPTION", "--migrationsDir", "/pb_migrations", "--hooksDir", "/pb_hooks"]
     volumes:
       - pocketbase-data:/pb_data
-      - ./pb_migrations:/pb_migrations
-      - ./pb_hooks:/pb_hooks
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8090/api/health"]
       interval: 30s

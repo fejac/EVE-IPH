@@ -2,7 +2,7 @@
 
 This folder contains a lightweight PocketBase deployment for Coolify/Docker.
 
-The deployment uses the community image `ghcr.io/muchobien/pocketbase`.
+The deployment builds a thin image from the community image `ghcr.io/muchobien/pocketbase` and copies this repository's migrations/hooks into it. This avoids unreliable relative bind mounts in Coolify.
 
 PocketBase stores its SQLite database and uploaded files in `/pb_data`, mapped to the `pocketbase-data` Docker volume.
 
@@ -53,6 +53,20 @@ The initial migration creates:
 - `market_scan_cache`
 
 Most app-specific data starts as JSON payloads. This keeps the server schema stable while the WPF planner is still changing.
+
+## Migration Files
+
+The `pb_migrations` and `pb_hooks` folders are copied into the image at build time.
+
+After changing migrations or hooks:
+
+1. Commit and push the repository.
+2. Redeploy/rebuild the Coolify application.
+3. Check the container shell:
+
+```sh
+ls -la /pb_migrations
+```
 
 ## EVE SSO Plan
 
