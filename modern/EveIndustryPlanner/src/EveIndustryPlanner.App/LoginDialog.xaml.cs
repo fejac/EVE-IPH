@@ -38,23 +38,21 @@ public partial class LoginDialog : Window
     {
         InitializeComponent();
         settings = settingsService.Load();
-        PocketBaseUrlTextBox.Text = settings.PocketBaseUrl;
-        StatusTextBlock.Text = "Enter the PocketBase server URL and sign in.";
+        StatusTextBlock.Text = "Sign in with EVE SSO to continue.";
     }
 
     public SavedCharacterAccount? AuthenticatedAccount { get; private set; }
 
     private async void LoginButton_Click(object sender, RoutedEventArgs e)
     {
-        var pocketBaseUrl = PocketBaseUrlTextBox.Text.Trim();
+        var pocketBaseUrl = ResolvePocketBaseUrl(settings);
         if (string.IsNullOrWhiteSpace(pocketBaseUrl))
         {
-            StatusTextBlock.Text = "PocketBase URL is required.";
+            StatusTextBlock.Text = "PocketBase server URL is not configured.";
             return;
         }
 
         LoginButton.IsEnabled = false;
-        PocketBaseUrlTextBox.IsEnabled = false;
         StatusTextBlock.Text = "Waiting for EVE SSO login.";
 
         try
@@ -69,8 +67,14 @@ public partial class LoginDialog : Window
         {
             StatusTextBlock.Text = $"Login failed: {ex.Message}";
             LoginButton.IsEnabled = true;
-            PocketBaseUrlTextBox.IsEnabled = true;
         }
+    }
+
+    private static string ResolvePocketBaseUrl(UserSettings settings)
+    {
+        return string.IsNullOrWhiteSpace(settings.PocketBaseUrl)
+            ? UserSettings.DefaultPocketBaseUrl
+            : settings.PocketBaseUrl.Trim();
     }
 
     private static SavedCharacterAccount ToSavedAccount(EveSsoCharacterToken token)

@@ -189,7 +189,9 @@ public sealed class MainWindowViewModel : ObservableObject
         maxBuildBuyDepth = Math.Clamp(settings.MaxBuildBuyDepth, 0, 20);
         LoadFacilityProfiles(settings);
         LoadCharacterAccounts(settings);
-        pocketBaseUrl = settings.PocketBaseUrl;
+        pocketBaseUrl = string.IsNullOrWhiteSpace(settings.PocketBaseUrl)
+            ? UserSettings.DefaultPocketBaseUrl
+            : settings.PocketBaseUrl;
         selectedFinalProductFacility = FindFacility(settings.FinalProductFacilityId);
         selectedComponentFacility = FindFacility(settings.ComponentFacilityId);
         selectedReactionFacility = FindFacility(settings.ReactionFacilityId);

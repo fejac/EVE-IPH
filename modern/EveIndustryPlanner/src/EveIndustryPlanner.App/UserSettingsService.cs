@@ -69,6 +69,8 @@ public sealed class UserSettingsService(string settingsFilePath)
 
 public sealed class UserSettings
 {
+    public const string DefaultPocketBaseUrl = "https://eve.fejac.cz";
+
     public List<SavedFacilityProfile> FacilityProfiles { get; init; } =
     [
         SavedFacilityProfile.None
@@ -86,7 +88,7 @@ public sealed class UserSettings
     public bool EnableBuildBuy { get; init; }
     public BuildBuyDepth BuildBuyDepth { get; init; } = BuildBuyDepth.DirectMaterialsOnly;
     public int MaxBuildBuyDepth { get; init; } = 6;
-    public string PocketBaseUrl { get; init; } = string.Empty;
+    public string PocketBaseUrl { get; init; } = DefaultPocketBaseUrl;
 }
 
 public sealed class SavedCharacterAccount
