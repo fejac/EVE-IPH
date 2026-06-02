@@ -40,11 +40,28 @@ public sealed class SdeIndustryDataProviderTests : IDisposable
               volume: 0.01
             200:
               basePrice: 5000.0
+              groupID: 25
+              metaGroupID: 2
               name:
                 en: Test Product
               portionSize: 1
               published: true
               volume: 5.0
+            """);
+        File.WriteAllText(Path.Combine(tempDirectory, "groups.yaml"), """
+            25:
+              categoryID: 6
+            """);
+        File.WriteAllText(Path.Combine(tempDirectory, "metaGroups.yaml"), """
+            2:
+              name:
+                en: Tech II
+            """);
+        File.WriteAllText(Path.Combine(tempDirectory, "typeDogma.yaml"), """
+            200:
+              dogmaAttributes:
+              - attributeID: 422
+                value: 2.0
             """);
     }
 
@@ -61,6 +78,20 @@ public sealed class SdeIndustryDataProviderTests : IDisposable
         Assert.Equal("Test Product", blueprint.ProductName);
         Assert.Equal(TimeSpan.FromSeconds(60), blueprint.BaseProductionTime);
         Assert.Contains(blueprint.Materials, material => material.Name == "Tritanium" && material.Quantity == 10);
+    }
+
+    [Fact]
+    public async Task GetManufacturableBlueprints_ReadsProductTechAndMetaGroup()
+    {
+        var provider = new SdeIndustryDataProvider(tempDirectory);
+
+        var catalog = await provider.GetManufacturableBlueprintsAsync(CancellationToken.None);
+        var item = catalog.Single();
+
+        Assert.Equal(2, item.TechLevel);
+        Assert.Equal(2, item.MetaGroupId);
+        Assert.Equal("Tech II", item.MetaGroupName);
+        Assert.Equal(6, item.ProductCategoryId);
     }
 
     [Fact]

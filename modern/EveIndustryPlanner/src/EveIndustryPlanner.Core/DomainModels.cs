@@ -52,6 +52,8 @@ public sealed record BlueprintCatalogItem(
     string BlueprintName,
     string ProductName,
     int TechLevel,
+    int? MetaGroupId,
+    string MetaGroupName,
     BlueprintActivityType ActivityType);
 
 public sealed record SolarSystemSearchResult(
@@ -75,6 +77,8 @@ public sealed class BlueprintDefinition
     public string BlueprintName { get; init; } = string.Empty;
     public string ProductName { get; init; } = string.Empty;
     public int TechLevel { get; init; }
+    public int? MetaGroupId { get; init; }
+    public string MetaGroupName { get; init; } = string.Empty;
     public int ProductQuantity { get; init; } = 1;
     public TimeSpan BaseProductionTime { get; init; }
     public BlueprintActivityType ActivityType { get; init; } = BlueprintActivityType.Manufacturing;

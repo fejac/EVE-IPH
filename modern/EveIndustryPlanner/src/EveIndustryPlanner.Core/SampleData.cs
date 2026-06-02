@@ -65,6 +65,8 @@ public sealed class SampleBlueprintRepository : IBlueprintRepository, IBlueprint
                 bp.BlueprintName,
                 bp.ProductName,
                 bp.TechLevel,
+                bp.MetaGroupId,
+                bp.MetaGroupName,
                 bp.ActivityType))
             .ToList();
 

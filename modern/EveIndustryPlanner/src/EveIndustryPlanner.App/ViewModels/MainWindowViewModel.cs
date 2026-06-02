@@ -84,6 +84,7 @@ public sealed class MainWindowViewModel : ObservableObject
     private int maxParallelReactionJobs = 5;
     private CharacterAccountOption? selectedCharacterAccount;
     private MarketScannerFilterOption selectedMarketScannerFilter;
+    private MarketScannerTechFilterOption selectedMarketScannerTechFilter;
     private int marketScannerMaxItems = 100;
     private bool isMarketScannerBusy;
     private string marketScannerStatusText = "Scanner ready.";
@@ -166,6 +167,7 @@ public sealed class MainWindowViewModel : ObservableObject
         selectedProductionPlannerScope = ProductionPlannerScopes.First(option => option.Scope == ProductionPlannerScope.AllLedgerItems);
         selectedProductionJobFilter = ProductionJobFilters.First(option => option.Filter == ProductionJobFilter.Open);
         selectedMarketScannerFilter = MarketScannerFilters.First(option => option.Filter == MarketScannerFilter.All);
+        selectedMarketScannerTechFilter = MarketScannerTechFilters.First(option => option.Filter == MarketScannerTechFilter.All);
         enableBuildBuy = settings.EnableBuildBuy;
         maxBuildBuyDepth = Math.Clamp(settings.MaxBuildBuyDepth, 0, 20);
         LoadFacilityProfiles(settings);
@@ -269,6 +271,19 @@ public sealed class MainWindowViewModel : ObservableObject
         new("Charges", MarketScannerFilter.Charges),
         new("Structures", MarketScannerFilter.Structures),
         new("Other", MarketScannerFilter.Other)
+    ];
+
+    public IReadOnlyList<MarketScannerTechFilterOption> MarketScannerTechFilters { get; } =
+    [
+        new("All", MarketScannerTechFilter.All),
+        new("Tech I", MarketScannerTechFilter.Tech1),
+        new("Tech II", MarketScannerTechFilter.Tech2),
+        new("Tech III", MarketScannerTechFilter.Tech3),
+        new("Faction", MarketScannerTechFilter.Faction),
+        new("Storyline", MarketScannerTechFilter.Storyline),
+        new("Officer", MarketScannerTechFilter.Officer),
+        new("Deadspace", MarketScannerTechFilter.Deadspace),
+        new("Other Meta", MarketScannerTechFilter.OtherMeta)
     ];
 
     public IReadOnlyList<ProductionPlannerScopeOption> ProductionPlannerScopes { get; } =
@@ -884,6 +899,18 @@ public sealed class MainWindowViewModel : ObservableObject
         }
     }
 
+    public MarketScannerTechFilterOption SelectedMarketScannerTechFilter
+    {
+        get => selectedMarketScannerTechFilter;
+        set
+        {
+            if (value is not null)
+            {
+                SetProperty(ref selectedMarketScannerTechFilter, value);
+            }
+        }
+    }
+
     public int MarketScannerMaxItems
     {
         get => marketScannerMaxItems;
@@ -1329,6 +1356,7 @@ public sealed class MainWindowViewModel : ObservableObject
             var catalog = await blueprintCatalogProvider.GetManufacturableBlueprintsAsync(CancellationToken.None);
             var candidates = catalog
                 .Where(item => MatchesMarketScannerFilter(item, SelectedMarketScannerFilter.Filter))
+                .Where(item => MatchesMarketScannerTechFilter(item, SelectedMarketScannerTechFilter.Filter))
                 .OrderBy(item => item.ProductName)
                 .ToList();
 
@@ -1352,6 +1380,7 @@ public sealed class MainWindowViewModel : ObservableObject
                         item.ProductName,
                         item.BlueprintName,
                         ClassifyMarketScannerItem(item),
+                        FormatMarketScannerTechMeta(item),
                         item.ActivityType == BlueprintActivityType.Reaction ? "Reaction" : "Manufacturing",
                         scanResult.OutputQuantity,
                         scanResult.MaterialCost,
@@ -1372,6 +1401,7 @@ public sealed class MainWindowViewModel : ObservableObject
                         item.ProductName,
                         item.BlueprintName,
                         ClassifyMarketScannerItem(item),
+                        FormatMarketScannerTechMeta(item),
                         item.ActivityType == BlueprintActivityType.Reaction ? "Reaction" : "Manufacturing",
                         0,
                         0,
@@ -1419,6 +1449,7 @@ public sealed class MainWindowViewModel : ObservableObject
         return string.Join(
             "|",
             SelectedMarketScannerFilter.Filter,
+            SelectedMarketScannerTechFilter.Filter,
             MarketScannerMaxItems,
             Runs,
             MaterialEfficiency,
@@ -1449,6 +1480,23 @@ public sealed class MainWindowViewModel : ObservableObject
             MarketScannerFilter.Charges => item.ProductCategoryId == 8,
             MarketScannerFilter.Structures => item.ProductCategoryId is 22 or 23 or 65,
             MarketScannerFilter.Other => ClassifyMarketScannerItem(item) == "Other",
+            _ => true
+        };
+    }
+
+    private static bool MatchesMarketScannerTechFilter(BlueprintCatalogItem item, MarketScannerTechFilter filter)
+    {
+        return filter switch
+        {
+            MarketScannerTechFilter.All => true,
+            MarketScannerTechFilter.Tech1 => (item.MetaGroupId is null or 1) && item.TechLevel <= 1,
+            MarketScannerTechFilter.Tech2 => item.MetaGroupId == 2 || item.TechLevel == 2,
+            MarketScannerTechFilter.Tech3 => item.MetaGroupId == 14 || item.TechLevel == 3,
+            MarketScannerTechFilter.Faction => item.MetaGroupId == 4,
+            MarketScannerTechFilter.Storyline => item.MetaGroupId == 3,
+            MarketScannerTechFilter.Officer => item.MetaGroupId == 5,
+            MarketScannerTechFilter.Deadspace => item.MetaGroupId == 6,
+            MarketScannerTechFilter.OtherMeta => item.MetaGroupId is not null and not (1 or 2 or 3 or 4 or 5 or 6 or 14),
             _ => true
         };
     }
@@ -1492,6 +1540,27 @@ public sealed class MainWindowViewModel : ObservableObject
         }
 
         return "Other";
+    }
+
+    private static string FormatMarketScannerTechMeta(BlueprintCatalogItem item)
+    {
+        return item.MetaGroupId switch
+        {
+            1 => "Tech I",
+            2 => "Tech II",
+            3 => "Storyline",
+            4 => "Faction",
+            5 => "Officer",
+            6 => "Deadspace",
+            14 => "Tech III",
+            _ when !string.IsNullOrWhiteSpace(item.MetaGroupName) => item.MetaGroupName,
+            _ => item.TechLevel switch
+            {
+                2 => "Tech II",
+                3 => "Tech III",
+                _ => "Tech I"
+            }
+        };
     }
 
     private void CopyShoppingList()
@@ -1661,7 +1730,8 @@ public sealed class MainWindowViewModel : ObservableObject
         var dialog = new OpenFileDialog
         {
             Title = "Load production ledger",
-            Filter = "Production ledger (*.json)|*.json|JSON files (*.json)|*.json|All files (*.*)|*.*"
+            Filter = "Production ledger (*.json)|*.json|JSON files (*.json)|*.json|All files (*.*)|*.*",
+            Multiselect = true
         };
 
         if (dialog.ShowDialog() != true)
@@ -1671,34 +1741,61 @@ public sealed class MainWindowViewModel : ObservableObject
 
         try
         {
-            using var stream = File.OpenRead(dialog.FileName);
-            var document = JsonSerializer.Deserialize<ProductionLedgerDocument>(stream, LedgerJsonOptions);
-            if (document?.Settings is not null)
+            var loadedEntries = new List<ProductionLedgerEntry>();
+            var loadedJobStates = new List<ProductionJobCompletionState>();
+            ProductionPlannerSettings? lastSettings = null;
+
+            foreach (var fileName in dialog.FileNames)
             {
-                SelectedProductionPlannerScope = ProductionPlannerScopes.FirstOrDefault(option => option.Scope == document.Settings.Scope)
-                    ?? ProductionPlannerScopes.First();
-                SelectedProductionJobFilter = ProductionJobFilters.FirstOrDefault(option => option.Filter == document.Settings.Filter)
-                    ?? ProductionJobFilters.First();
-                MaxManufacturingJobHours = document.Settings.MaxManufacturingJobHours;
-                MaxReactionJobHours = document.Settings.MaxReactionJobHours;
-                MaxParallelManufacturingJobs = document.Settings.MaxParallelManufacturingJobs;
-                MaxParallelReactionJobs = document.Settings.MaxParallelReactionJobs;
+                using var stream = File.OpenRead(fileName);
+                var document = JsonSerializer.Deserialize<ProductionLedgerDocument>(stream, LedgerJsonOptions);
+                if (document is null)
+                {
+                    continue;
+                }
+
+                lastSettings = document.Settings;
+                loadedEntries.AddRange(document.Entries);
+                loadedJobStates.AddRange(document.JobStates);
             }
 
-            productionJobCompletionStates = (document?.JobStates ?? [])
+            if (lastSettings is not null)
+            {
+                SelectedProductionPlannerScope = ProductionPlannerScopes.FirstOrDefault(option => option.Scope == lastSettings.Scope)
+                    ?? ProductionPlannerScopes.First();
+                SelectedProductionJobFilter = ProductionJobFilters.FirstOrDefault(option => option.Filter == lastSettings.Filter)
+                    ?? ProductionJobFilters.First();
+                MaxManufacturingJobHours = lastSettings.MaxManufacturingJobHours;
+                MaxReactionJobHours = lastSettings.MaxReactionJobHours;
+                MaxParallelManufacturingJobs = lastSettings.MaxParallelManufacturingJobs;
+                MaxParallelReactionJobs = lastSettings.MaxParallelReactionJobs;
+            }
+
+            var loadedStatesByKey = loadedJobStates
                 .Where(state => !string.IsNullOrWhiteSpace(state.StableKey))
                 .GroupBy(state => state.StableKey, StringComparer.Ordinal)
                 .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
-            ProductionLedgerEntries.Clear();
-            foreach (var entry in document?.Entries ?? [])
+            foreach (var state in loadedStatesByKey)
             {
-                ProductionLedgerEntries.Add(entry);
+                productionJobCompletionStates[state.Key] = state.Value;
             }
 
-            SelectedProductionLedgerEntry = ProductionLedgerEntries.FirstOrDefault();
+            var existingEntryIds = ProductionLedgerEntries.Select(entry => entry.Id).ToHashSet();
+            ProductionLedgerEntry? firstLoadedEntry = null;
+            foreach (var entry in loadedEntries)
+            {
+                var entryToAdd = existingEntryIds.Add(entry.Id)
+                    ? entry
+                    : entry with { Id = Guid.NewGuid() };
+                existingEntryIds.Add(entryToAdd.Id);
+                ProductionLedgerEntries.Add(entryToAdd);
+                firstLoadedEntry ??= entryToAdd;
+            }
+
+            SelectedProductionLedgerEntry = firstLoadedEntry ?? ProductionLedgerEntries.FirstOrDefault();
             RefreshProductionLedger();
             SelectedWorkspaceTab = 1;
-            StatusText = $"Production ledger loaded: {dialog.FileName}";
+            StatusText = $"Loaded {loadedEntries.Count:N0} production jobs from {dialog.FileNames.Length:N0} JSON file(s)";
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
         {
@@ -2750,6 +2847,21 @@ public sealed class MainWindowViewModel : ObservableObject
 
     public sealed record MarketScannerFilterOption(string Name, MarketScannerFilter Filter);
 
+    public enum MarketScannerTechFilter
+    {
+        All,
+        Tech1,
+        Tech2,
+        Tech3,
+        Faction,
+        Storyline,
+        Officer,
+        Deadspace,
+        OtherMeta
+    }
+
+    public sealed record MarketScannerTechFilterOption(string Name, MarketScannerTechFilter Filter);
+
     public sealed record FacilityStructureOption(string Id, string Name, int RigSlots, FacilityRigSize RigSize);
 
     public sealed record FacilityServiceOption(string Id, string Name, FacilityServiceRole Role);
@@ -2839,6 +2951,7 @@ public sealed class MainWindowViewModel : ObservableObject
         string ProductName,
         string BlueprintName,
         string ItemType,
+        string TechMeta,
         string Activity,
         long OutputQuantity,
         decimal MaterialCost,

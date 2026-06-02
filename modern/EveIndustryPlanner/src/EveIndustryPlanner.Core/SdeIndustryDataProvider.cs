@@ -73,7 +73,9 @@ public sealed class SdeIndustryDataProvider(string sdeDirectory) : IBlueprintRep
                     productType.CategoryId,
                     GetTypeOrUnknown(sde, blueprint.BlueprintTypeId).Name,
                     productType.Name,
-                    1,
+                    productType.TechLevel,
+                    productType.MetaGroupId,
+                    productType.MetaGroupName,
                     blueprint.ActivityType);
             })
             .OrderBy(item => item.ProductName)
@@ -115,7 +117,9 @@ public sealed class SdeIndustryDataProvider(string sdeDirectory) : IBlueprintRep
             ProductCategoryId = productType.CategoryId,
             BlueprintName = GetTypeOrUnknown(sde, blueprint.BlueprintTypeId).Name,
             ProductName = productType.Name,
-            TechLevel = 1,
+            TechLevel = productType.TechLevel,
+            MetaGroupId = productType.MetaGroupId,
+            MetaGroupName = productType.MetaGroupName,
             ProductQuantity = blueprint.Product.Quantity,
             BaseProductionTime = TimeSpan.FromSeconds(blueprint.Activity.Time),
             ActivityType = blueprint.ActivityType,
@@ -168,7 +172,7 @@ public sealed class SdeIndustryDataProvider(string sdeDirectory) : IBlueprintRep
             new BlueprintId(blueprint.BlueprintTypeId),
             GetTypeOrUnknown(sde, blueprint.BlueprintTypeId).Name,
             GetTypeOrUnknown(sde, productTypeId).Name,
-            1);
+            GetTypeOrUnknown(sde, productTypeId).TechLevel);
     }
 
     private static SdeTypeInfo GetTypeOrUnknown(SdeData sde, long typeId)
@@ -202,6 +206,11 @@ public sealed class SdeIndustryDataProvider(string sdeDirectory) : IBlueprintRep
         var groups = File.Exists(groupPath)
             ? deserializer.Deserialize<Dictionary<int, SdeGroup>>(File.ReadAllText(groupPath))
             : [];
+        var metaGroupPath = Path.Combine(sdeDirectory, "metaGroups.yaml");
+        var metaGroups = File.Exists(metaGroupPath)
+            ? deserializer.Deserialize<Dictionary<int, SdeMetaGroup>>(File.ReadAllText(metaGroupPath))
+            : [];
+        var techLevels = LoadTechLevels(sdeDirectory, deserializer);
 
         var types = deserializer.Deserialize<Dictionary<long, SdeType>>(typeReader)
             .ToDictionary(
@@ -214,7 +223,14 @@ public sealed class SdeIndustryDataProvider(string sdeDirectory) : IBlueprintRep
                     BasePrice = pair.Value.BasePrice,
                     Volume = pair.Value.Volume,
                     PortionSize = pair.Value.PortionSize,
-                    Published = pair.Value.Published
+                    Published = pair.Value.Published,
+                    TechLevel = techLevels.TryGetValue(pair.Key, out var techLevel)
+                        ? techLevel
+                        : ResolveTechLevel(pair.Value.MetaGroupId),
+                    MetaGroupId = pair.Value.MetaGroupId,
+                    MetaGroupName = pair.Value.MetaGroupId is int metaGroupId && metaGroups.TryGetValue(metaGroupId, out var metaGroup)
+                        ? metaGroup.Name.TryGetValue("en", out var metaGroupName) ? metaGroupName : string.Empty
+                        : string.Empty
                 });
 
         var manufacturedTypeIds = blueprints.Values
@@ -331,6 +347,8 @@ public sealed class SdeIndustryDataProvider(string sdeDirectory) : IBlueprintRep
             "blueprints.yaml",
             "types.yaml",
             "groups.yaml",
+            "metaGroups.yaml",
+            "typeDogma.yaml",
             "mapSolarSystems.yaml"
         };
 
@@ -359,6 +377,35 @@ public sealed class SdeIndustryDataProvider(string sdeDirectory) : IBlueprintRep
     {
         PropertyNameCaseInsensitive = true
     };
+
+    private static Dictionary<long, int> LoadTechLevels(string sdeDirectory, IDeserializer deserializer)
+    {
+        var typeDogmaPath = Path.Combine(sdeDirectory, "typeDogma.yaml");
+        if (!File.Exists(typeDogmaPath))
+        {
+            return [];
+        }
+
+        var typeDogma = deserializer.Deserialize<Dictionary<long, SdeTypeDogma>>(File.ReadAllText(typeDogmaPath));
+        return typeDogma
+            .Select(pair => new
+            {
+                TypeId = pair.Key,
+                TechLevel = pair.Value.DogmaAttributes.FirstOrDefault(attribute => attribute.AttributeId == 422)?.Value
+            })
+            .Where(entry => entry.TechLevel.HasValue)
+            .ToDictionary(entry => entry.TypeId, entry => Math.Max(1, (int)Math.Round(entry.TechLevel!.Value)));
+    }
+
+    private static int ResolveTechLevel(int? metaGroupId)
+    {
+        return metaGroupId switch
+        {
+            2 => 2,
+            14 => 3,
+            _ => 1
+        };
+    }
 
     private sealed record SdeData(
         IReadOnlyDictionary<long, SdeBlueprint> Blueprints,
@@ -454,12 +501,36 @@ public sealed class SdeIndustryDataProvider(string sdeDirectory) : IBlueprintRep
 
         [YamlMember(Alias = "volume")]
         public double Volume { get; init; }
+
+        [YamlMember(Alias = "metaGroupID")]
+        public int? MetaGroupId { get; init; }
     }
 
     private sealed class SdeGroup
     {
         [YamlMember(Alias = "categoryID")]
         public int CategoryId { get; init; }
+    }
+
+    private sealed class SdeMetaGroup
+    {
+        [YamlMember(Alias = "name")]
+        public Dictionary<string, string> Name { get; init; } = [];
+    }
+
+    private sealed class SdeTypeDogma
+    {
+        [YamlMember(Alias = "dogmaAttributes")]
+        public List<SdeDogmaAttribute> DogmaAttributes { get; init; } = [];
+    }
+
+    private sealed class SdeDogmaAttribute
+    {
+        [YamlMember(Alias = "attributeID")]
+        public int AttributeId { get; init; }
+
+        [YamlMember(Alias = "value")]
+        public double Value { get; init; }
     }
 
     private sealed class SdeTypeInfo
@@ -471,6 +542,9 @@ public sealed class SdeIndustryDataProvider(string sdeDirectory) : IBlueprintRep
         public int PortionSize { get; init; } = 1;
         public bool Published { get; init; }
         public double Volume { get; init; }
+        public int TechLevel { get; init; } = 1;
+        public int? MetaGroupId { get; init; }
+        public string MetaGroupName { get; init; } = string.Empty;
     }
 
     private sealed class SdeSolarSystem
