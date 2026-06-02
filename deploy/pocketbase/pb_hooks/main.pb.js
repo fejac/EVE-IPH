@@ -1,11 +1,15 @@
 const EVE_TOKEN_URL = "https://login.eveonline.com/v2/oauth/token";
 
+function asString(value) {
+  return value === undefined || value === null ? "" : String(value);
+}
+
 routerAdd("POST", "/api/eve-industry/auth/eve/callback", (e) => {
   try {
     const body = e.requestInfo().body || {};
-    const code = stringValue(body.code);
-    const codeVerifier = stringValue(body.code_verifier);
-    const redirectUri = stringValue(body.redirect_uri) || $os.getenv("EVE_SSO_REDIRECT_URI");
+    const code = asString(body.code);
+    const codeVerifier = asString(body.code_verifier);
+    const redirectUri = asString(body.redirect_uri) || $os.getenv("EVE_SSO_REDIRECT_URI");
     const clientId = $os.getenv("EVE_SSO_CLIENT_ID");
     const clientSecret = $os.getenv("EVE_SSO_CLIENT_SECRET");
     const tokenEncryptionKey = $os.getenv("TOKEN_ENCRYPTION_KEY");
@@ -83,9 +87,9 @@ function exchangeEveAuthorizationCode(code, codeVerifier, redirectUri, clientId,
 
 function readEveIdentity(accessToken) {
   const claims = $security.parseUnverifiedJWT(accessToken);
-  const sub = stringValue(claims.sub);
+  const sub = asString(claims.sub);
   const characterId = sub.split(":").pop();
-  const characterName = stringValue(claims.name);
+  const characterName = asString(claims.name);
 
   if (!characterId || !characterName) {
     throw new BadRequestError("EVE SSO token did not contain a character identity.");
@@ -137,9 +141,9 @@ function upsertEveAccount(user, identity, token, tokenEncryptionKey) {
   const expiresIn = Number(token.expires_in || 1200);
   const expiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
   const tokenBundle = {
-    access_token: stringValue(token.access_token),
-    refresh_token: stringValue(token.refresh_token),
-    token_type: stringValue(token.token_type) || "Bearer",
+    access_token: asString(token.access_token),
+    refresh_token: asString(token.refresh_token),
+    token_type: asString(token.token_type) || "Bearer",
     expires_at: expiresAt,
   };
 
@@ -160,7 +164,7 @@ function normalizeScopes(scopes) {
   }
 
   if (Array.isArray(scopes)) {
-    return scopes.map(stringValue).filter((scope) => scope.length > 0);
+    return scopes.map(asString).filter((scope) => scope.length > 0);
   }
 
   return String(scopes)
@@ -174,8 +178,4 @@ function encodeForm(values) {
     .filter((key) => values[key] !== undefined && values[key] !== null && String(values[key]).length > 0)
     .map((key) => encodeURIComponent(key) + "=" + encodeURIComponent(String(values[key])))
     .join("&");
-}
-
-function stringValue(value) {
-  return value === undefined || value === null ? "" : String(value);
 }
