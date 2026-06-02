@@ -86,6 +86,7 @@ public sealed class MainWindowViewModel : ObservableObject
     private int maxParallelManufacturingJobs = 10;
     private int maxParallelReactionJobs = 5;
     private CharacterAccountOption? selectedCharacterAccount;
+    private string pocketBaseUrl = string.Empty;
     private MarketScannerFilterOption selectedMarketScannerFilter;
     private MarketScannerTechFilterOption selectedMarketScannerTechFilter;
     private int marketScannerMaxItems = 100;
@@ -129,6 +130,19 @@ public sealed class MainWindowViewModel : ObservableObject
     public MainWindowViewModel()
         : this(CreateDefaultServices())
     {
+    }
+
+    public MainWindowViewModel(SavedCharacterAccount authenticatedAccount)
+        : this()
+    {
+        var account = CharacterAccounts.FirstOrDefault(character => character.CharacterId == authenticatedAccount.CharacterId);
+        if (account is null)
+        {
+            account = CharacterAccountOption.FromSaved(authenticatedAccount);
+            CharacterAccounts.Add(account);
+        }
+
+        SelectedCharacterAccount = account;
     }
 
     private MainWindowViewModel(DefaultServices services)
@@ -175,6 +189,7 @@ public sealed class MainWindowViewModel : ObservableObject
         maxBuildBuyDepth = Math.Clamp(settings.MaxBuildBuyDepth, 0, 20);
         LoadFacilityProfiles(settings);
         LoadCharacterAccounts(settings);
+        pocketBaseUrl = settings.PocketBaseUrl;
         selectedFinalProductFacility = FindFacility(settings.FinalProductFacilityId);
         selectedComponentFacility = FindFacility(settings.ComponentFacilityId);
         selectedReactionFacility = FindFacility(settings.ReactionFacilityId);
@@ -966,8 +981,23 @@ public sealed class MainWindowViewModel : ObservableObject
     public string SelectedCharacterTokenText =>
         SelectedCharacterAccount is null
             ? string.Empty
-            : $"Access: {MaskToken(SelectedCharacterAccount.AccessToken)}{Environment.NewLine}"
-              + $"Refresh: {MaskToken(SelectedCharacterAccount.RefreshToken)}";
+            : SelectedCharacterAccount.TokenType == "PocketBase"
+                ? $"PocketBase auth: {MaskToken(SelectedCharacterAccount.AccessToken)}{Environment.NewLine}"
+                  + "ESI refresh token is stored server-side."
+                : $"Access: {MaskToken(SelectedCharacterAccount.AccessToken)}{Environment.NewLine}"
+                  + $"Refresh: {MaskToken(SelectedCharacterAccount.RefreshToken)}";
+
+    public string PocketBaseUrl
+    {
+        get => pocketBaseUrl;
+        set
+        {
+            if (SetProperty(ref pocketBaseUrl, value?.Trim() ?? string.Empty))
+            {
+                SaveUserSettings();
+            }
+        }
+    }
 
     public ManufacturingResult? Result
     {
@@ -2783,8 +2813,7 @@ public sealed class MainWindowViewModel : ObservableObject
 
     private static string GetSettingsFilePath()
     {
-        var appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        return Path.Combine(appData, "EveIndustryPlanner", "settings.json");
+        return UserSettingsService.GetDefaultSettingsFilePath();
     }
 
     private MarketLocationOption FindMarketLocation(long locationId)
@@ -2858,7 +2887,12 @@ public sealed class MainWindowViewModel : ObservableObject
         {
             IsBusy = true;
             StatusText = "Waiting for EVE SSO login";
-            var token = await characterAuthService.AddCharacterAsync(DefaultCharacterScopes);
+            var token = string.IsNullOrWhiteSpace(PocketBaseUrl)
+                ? await characterAuthService.AddCharacterAsync(DefaultCharacterScopes)
+                : await characterAuthService.AddCharacterViaPocketBaseAsync(
+                    PocketBaseUrl,
+                    DefaultCharacterScopes,
+                    SelectedCharacterAccount?.TokenType == "PocketBase" ? SelectedCharacterAccount.AccessToken : null);
             UpsertCharacterAccount(token);
             SaveUserSettings();
             StatusText = $"Character added: {token.CharacterName}";
@@ -2882,6 +2916,12 @@ public sealed class MainWindowViewModel : ObservableObject
 
         try
         {
+            if (SelectedCharacterAccount.TokenType == "PocketBase")
+            {
+                StatusText = "PocketBase-linked ESI tokens are refreshed server-side";
+                return;
+            }
+
             IsBusy = true;
             StatusText = $"Refreshing token: {SelectedCharacterAccount.CharacterName}";
             var token = await characterAuthService.RefreshAccessTokenAsync(SelectedCharacterAccount.ToSaved());
@@ -2974,7 +3014,8 @@ public sealed class MainWindowViewModel : ObservableObject
             ProductPriceSelection = SelectedProductPriceStrategy.Selection,
             EnableBuildBuy = EnableBuildBuy,
             BuildBuyDepth = SelectedBuildBuyDepth.Depth,
-            MaxBuildBuyDepth = MaxBuildBuyDepth
+            MaxBuildBuyDepth = MaxBuildBuyDepth,
+            PocketBaseUrl = PocketBaseUrl
         });
     }
 
@@ -3068,7 +3109,7 @@ public sealed class MainWindowViewModel : ObservableObject
         DateTimeOffset AddedAt,
         DateTimeOffset UpdatedAt)
     {
-        public string TokenExpiresText => AccessTokenExpiresAt.ToLocalTime().ToString("g");
+        public string TokenExpiresText => TokenType == "PocketBase" ? "Server managed" : AccessTokenExpiresAt.ToLocalTime().ToString("g");
         public string AddedAtText => AddedAt.ToLocalTime().ToString("g");
         public string ScopesPreview => Scopes.Count == 0 ? "No scopes" : string.Join(", ", Scopes.Take(3)) + (Scopes.Count > 3 ? $" +{Scopes.Count - 3}" : string.Empty);
         public bool HasRefreshToken => !string.IsNullOrWhiteSpace(RefreshToken);

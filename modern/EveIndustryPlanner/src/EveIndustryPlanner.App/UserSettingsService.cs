@@ -39,6 +39,12 @@ public sealed class UserSettingsService(string settingsFilePath)
         }
     }
 
+    public static string GetDefaultSettingsFilePath()
+    {
+        var appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        return Path.Combine(appData, "EveIndustryPlanner", "settings.json");
+    }
+
     public void Save(UserSettings settings)
     {
         try
@@ -80,6 +86,7 @@ public sealed class UserSettings
     public bool EnableBuildBuy { get; init; }
     public BuildBuyDepth BuildBuyDepth { get; init; } = BuildBuyDepth.DirectMaterialsOnly;
     public int MaxBuildBuyDepth { get; init; } = 6;
+    public string PocketBaseUrl { get; init; } = string.Empty;
 }
 
 public sealed class SavedCharacterAccount

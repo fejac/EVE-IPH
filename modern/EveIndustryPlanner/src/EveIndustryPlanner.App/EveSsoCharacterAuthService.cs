@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
@@ -15,12 +16,32 @@ public sealed class EveSsoCharacterAuthService
     private const string ClientSecret = "J7O6k7SrVTDMIsiSYWN46cZbGmEdu5Uv13Unj8AS";
     private const string RedirectUrl = "http://localhost:8080/callback/";
     private const string CallbackListenPrefix = "http://localhost:8080/callback/";
+    private const string PocketBaseEveCallbackPath = "/api/eve-industry/auth/eve/callback";
 
     private readonly HttpClient httpClient = new();
 
     public async Task<EveSsoCharacterToken> AddCharacterAsync(IReadOnlyList<string> scopes, CancellationToken cancellationToken = default)
     {
+        var callback = await BeginEveSsoAsync(scopes, usePkce: false, cancellationToken).ConfigureAwait(false);
+        return await ExchangeAuthorizationCodeAsync(callback.Code, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<EveSsoCharacterToken> AddCharacterViaPocketBaseAsync(string pocketBaseUrl, IReadOnlyList<string> scopes, string? pocketBaseAuthToken = null, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(pocketBaseUrl))
+        {
+            throw new ArgumentException("PocketBase URL is required.", nameof(pocketBaseUrl));
+        }
+
+        var callback = await BeginEveSsoAsync(scopes, usePkce: true, cancellationToken).ConfigureAwait(false);
+        return await ExchangeAuthorizationCodeWithPocketBaseAsync(pocketBaseUrl, callback, pocketBaseAuthToken, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<EveSsoCallback> BeginEveSsoAsync(IReadOnlyList<string> scopes, bool usePkce, CancellationToken cancellationToken)
+    {
         var state = Guid.NewGuid().ToString("N");
+        var codeVerifier = usePkce ? CreateCodeVerifier() : string.Empty;
+        var codeChallenge = usePkce ? CreateCodeChallenge(codeVerifier) : string.Empty;
         var scopeText = string.Join(' ', scopes.Distinct(StringComparer.Ordinal).Where(scope => !string.IsNullOrWhiteSpace(scope)));
 
         var loginUrl = AuthorizeUrl
@@ -28,7 +49,10 @@ public sealed class EveSsoCharacterAuthService
             + $"&redirect_uri={Uri.EscapeDataString(RedirectUrl)}"
             + $"&client_id={Uri.EscapeDataString(ClientId)}"
             + $"&scope={Uri.EscapeDataString(scopeText)}"
-            + $"&state={Uri.EscapeDataString(state)}";
+            + $"&state={Uri.EscapeDataString(state)}"
+            + (usePkce
+                ? $"&code_challenge={Uri.EscapeDataString(codeChallenge)}&code_challenge_method=S256"
+                : string.Empty);
 
         using var listener = new HttpListener();
         listener.Prefixes.Add(CallbackListenPrefix);
@@ -55,7 +79,7 @@ public sealed class EveSsoCharacterAuthService
             throw new InvalidOperationException("EVE SSO did not return an authorization code.");
         }
 
-        return await ExchangeAuthorizationCodeAsync(code, cancellationToken).ConfigureAwait(false);
+        return new EveSsoCallback(code, codeVerifier, RedirectUrl);
     }
 
     public async Task<EveSsoCharacterToken> RefreshAccessTokenAsync(SavedCharacterAccount account, CancellationToken cancellationToken = default)
@@ -113,6 +137,59 @@ public sealed class EveSsoCharacterAuthService
             token.TokenType,
             token.ExpiresIn,
             identity.Scopes);
+    }
+
+    private async Task<EveSsoCharacterToken> ExchangeAuthorizationCodeWithPocketBaseAsync(
+        string pocketBaseUrl,
+        EveSsoCallback callback,
+        string? pocketBaseAuthToken,
+        CancellationToken cancellationToken)
+    {
+        var endpoint = new Uri(new Uri(EnsureTrailingSlash(pocketBaseUrl)), PocketBaseEveCallbackPath.TrimStart('/'));
+        var payload = JsonSerializer.Serialize(new
+        {
+            code = callback.Code,
+            code_verifier = callback.CodeVerifier,
+            redirect_uri = callback.RedirectUri
+        });
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, endpoint);
+        request.Content = new StringContent(payload, Encoding.UTF8, "application/json");
+        if (!string.IsNullOrWhiteSpace(pocketBaseAuthToken))
+        {
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", pocketBaseAuthToken);
+        }
+
+        using var response = await httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        var responseText = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new InvalidOperationException($"PocketBase EVE SSO exchange failed: {responseText}");
+        }
+
+        using var json = JsonDocument.Parse(responseText);
+        var root = json.RootElement;
+        var authToken = root.GetProperty("token").GetString() ?? string.Empty;
+        var eveAccount = root.GetProperty("eve_account");
+        var characterIdText = eveAccount.GetProperty("character_id").GetString() ?? string.Empty;
+        var characterName = eveAccount.GetProperty("character_name").GetString() ?? string.Empty;
+        var scopes = eveAccount.TryGetProperty("scopes", out var scopesElement)
+            ? ReadScopes(scopesElement)
+            : [];
+
+        if (!long.TryParse(characterIdText, out var characterId) || characterName.Length == 0 || authToken.Length == 0)
+        {
+            throw new InvalidOperationException("PocketBase EVE SSO response did not contain a valid character identity.");
+        }
+
+        return new EveSsoCharacterToken(
+            characterId,
+            characterName,
+            authToken,
+            string.Empty,
+            "PocketBase",
+            0,
+            scopes);
     }
 
     private static async Task<HttpListenerContext> WaitForCallbackAsync(HttpListener listener, TimeSpan timeout, CancellationToken cancellationToken)
@@ -202,6 +279,46 @@ public sealed class EveSsoCharacterAuthService
         return Convert.FromBase64String(base64);
     }
 
+    private static string Base64UrlEncode(byte[] value)
+    {
+        return Convert.ToBase64String(value)
+            .TrimEnd('=')
+            .Replace('+', '-')
+            .Replace('/', '_');
+    }
+
+    private static string CreateCodeVerifier()
+    {
+        var bytes = RandomNumberGenerator.GetBytes(32);
+        return Base64UrlEncode(bytes);
+    }
+
+    private static string CreateCodeChallenge(string verifier)
+    {
+        var bytes = SHA256.HashData(Encoding.ASCII.GetBytes(verifier));
+        return Base64UrlEncode(bytes);
+    }
+
+    private static string EnsureTrailingSlash(string value)
+    {
+        return value.EndsWith("/", StringComparison.Ordinal) ? value : value + "/";
+    }
+
+    private static IReadOnlyList<string> ReadScopes(JsonElement element)
+    {
+        return element.ValueKind switch
+        {
+            JsonValueKind.Array => element.EnumerateArray()
+                .Select(scope => scope.GetString() ?? string.Empty)
+                .Where(scope => scope.Length > 0)
+                .ToList(),
+            JsonValueKind.String => (element.GetString() ?? string.Empty)
+                .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .ToList(),
+            _ => []
+        };
+    }
+
     private static AuthenticationHeaderValue CreateBasicAuthorizationHeader()
     {
         var value = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{ClientId}:{ClientSecret}"));
@@ -211,6 +328,8 @@ public sealed class EveSsoCharacterAuthService
     private sealed record TokenResponse(string AccessToken, string RefreshToken, string TokenType, int ExpiresIn);
 
     private sealed record CharacterIdentity(long CharacterId, string CharacterName, IReadOnlyList<string> Scopes);
+
+    private sealed record EveSsoCallback(string Code, string CodeVerifier, string RedirectUri);
 }
 
 public sealed record EveSsoCharacterToken(

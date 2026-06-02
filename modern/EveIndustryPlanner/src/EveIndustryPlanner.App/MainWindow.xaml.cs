@@ -6,8 +6,13 @@ namespace EveIndustryPlanner.App;
 public partial class MainWindow : Window
 {
     public MainWindow()
+        : this(new MainWindowViewModel())
+    {
+    }
+
+    public MainWindow(MainWindowViewModel viewModel)
     {
         InitializeComponent();
-        DataContext = new MainWindowViewModel();
+        DataContext = viewModel;
     }
 }
