@@ -1,0 +1,32 @@
+services:
+  pocketbase:
+    image: ghcr.io/muchobien/pocketbase:${PB_VERSION:-latest}
+    container_name: eve-industry-pocketbase
+    restart: unless-stopped
+    ports:
+      - "${POCKETBASE_PORT:-8090}:8090"
+    environment:
+      PB_HOST: 0.0.0.0
+      PB_PORT: 8090
+      TZ: ${TZ:-Europe/Prague}
+      ENCRYPTION: ${POCKETBASE_ENCRYPTION_KEY:-}
+      PB_ADMIN_EMAIL: ${PB_ADMIN_EMAIL:-}
+      PB_ADMIN_PASSWORD: ${PB_ADMIN_PASSWORD:-}
+      EVE_SSO_CLIENT_ID: ${EVE_SSO_CLIENT_ID:-}
+      EVE_SSO_CLIENT_SECRET: ${EVE_SSO_CLIENT_SECRET:-}
+      EVE_SSO_REDIRECT_URI: ${EVE_SSO_REDIRECT_URI:-}
+      TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:-}
+    command: ["--encryptionEnv", "ENCRYPTION", "--migrationsDir", "/pb_migrations", "--hooksDir", "/pb_hooks"]
+    volumes:
+      - pocketbase-data:/pb_data
+      - ./pb_migrations:/pb_migrations
+      - ./pb_hooks:/pb_hooks
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8090/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  pocketbase-data:
