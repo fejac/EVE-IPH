@@ -2,37 +2,28 @@ migrate((app) => {
   const userOwnRule = "id = @request.auth.id";
   const recordOwnRule = "user = @request.auth.id";
 
-  const users = new Collection({
-    type: "auth",
-    name: "users",
-    listRule: userOwnRule,
-    viewRule: userOwnRule,
-    createRule: null,
-    updateRule: userOwnRule,
-    deleteRule: userOwnRule,
-    fields: [
-      {
-        name: "display_name",
-        type: "text",
-        max: 120,
-        presentable: true
-      },
-      {
-        name: "primary_character_id",
-        type: "text",
-        max: 32
-      }
-    ],
-    passwordAuth: {
-      enabled: false
-    },
-    indexes: [
-      "CREATE UNIQUE INDEX idx_users_primary_character_id ON users (primary_character_id) WHERE primary_character_id != ''"
-    ]
+  const users = app.findCollectionByNameOrId("users");
+  users.listRule = userOwnRule;
+  users.viewRule = userOwnRule;
+  users.createRule = null;
+  users.updateRule = userOwnRule;
+  users.deleteRule = userOwnRule;
+  users.fields.add({
+    name: "display_name",
+    type: "text",
+    max: 120,
+    presentable: true
   });
+  users.fields.add({
+    name: "primary_character_id",
+    type: "text",
+    max: 32
+  });
+  users.indexes = [
+    ...(users.indexes || []),
+    "CREATE UNIQUE INDEX idx_users_primary_character_id ON users (primary_character_id) WHERE primary_character_id != ''"
+  ];
   app.save(users);
-
-  const userCollection = app.findCollectionByNameOrId("users");
 
   function ownedRelationField() {
     return {
@@ -40,7 +31,7 @@ migrate((app) => {
       type: "relation",
       required: true,
       maxSelect: 1,
-      collectionId: userCollection.id,
+      collectionId: users.id,
       cascadeDelete: true
     };
   }
@@ -206,8 +197,7 @@ migrate((app) => {
     "production_ledgers",
     "facilities",
     "user_settings",
-    "eve_accounts",
-    "users"
+    "eve_accounts"
   ].forEach((name) => {
     try {
       const collection = app.findCollectionByNameOrId(name);
@@ -215,4 +205,18 @@ migrate((app) => {
     } catch (_) {
     }
   });
+
+  try {
+    const users = app.findCollectionByNameOrId("users");
+    users.listRule = null;
+    users.viewRule = null;
+    users.createRule = null;
+    users.updateRule = null;
+    users.deleteRule = null;
+    users.fields.removeByName("display_name");
+    users.fields.removeByName("primary_character_id");
+    users.indexes = (users.indexes || []).filter((index) => !index.includes("idx_users_primary_character_id"));
+    app.save(users);
+  } catch (_) {
+  }
 });
