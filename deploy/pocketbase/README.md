@@ -68,14 +68,22 @@ After changing migrations or hooks:
 ls -la /pb_migrations
 ```
 
-## EVE SSO Plan
+## EVE SSO Flow
 
-EVE SSO is not a built-in PocketBase provider. The intended flow is:
+EVE SSO is handled by a custom PocketBase hook:
 
 1. Desktop app opens EVE SSO with PKCE.
-2. Desktop app sends the authorization code to a custom PocketBase endpoint.
+2. Desktop app catches the localhost callback.
+3. Desktop app sends the authorization code and PKCE verifier to:
+
+```text
+POST /api/eve-industry/auth/eve/callback
+```
+
 3. PocketBase exchanges the code with CCP, verifies the character identity and upserts `users` + `eve_accounts`.
 4. PocketBase returns a normal PocketBase auth response to the desktop app.
 5. ESI refresh tokens are stored server-side, encrypted with `TOKEN_ENCRYPTION_KEY`.
+
+`TOKEN_ENCRYPTION_KEY` must be exactly 32 characters because PocketBase `$security.encrypt` uses AES-256-GCM.
 
 The hook file is currently a placeholder so the deployment is usable immediately. The custom EVE auth endpoint should be added before moving refresh-token storage to the server.
