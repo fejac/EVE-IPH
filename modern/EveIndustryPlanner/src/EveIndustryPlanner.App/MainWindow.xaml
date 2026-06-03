@@ -619,13 +619,9 @@
                                         <DataGridTextColumn Header="Activity" Binding="{Binding ActivityName}" IsReadOnly="True" Width="105" />
                                         <DataGridTextColumn Header="Facility" Binding="{Binding FacilityName}" IsReadOnly="True" Width="130" />
                                         <DataGridTextColumn Header="Needed" Binding="{Binding RequiredQuantity, StringFormat=N0}" IsReadOnly="True" Width="90" />
-                                        <DataGridTextColumn Header="Out/Run" Binding="{Binding OutputQuantityPerRun, StringFormat=N0}" IsReadOnly="True" Width="80" />
-                                        <DataGridTextColumn Header="Total Runs" Binding="{Binding TotalRuns, StringFormat=N0}" IsReadOnly="True" Width="90" />
                                         <DataGridTextColumn Header="Job" Binding="{Binding JobLabel}" IsReadOnly="True" Width="70" />
                                         <DataGridTextColumn Header="Runs/Job" Binding="{Binding Runs, StringFormat=N0}" IsReadOnly="True" Width="85" />
-                                        <DataGridTextColumn Header="Time/Run" Binding="{Binding TimePerRunText}" IsReadOnly="True" Width="90" />
                                         <DataGridTextColumn Header="Job Time" Binding="{Binding DurationText}" IsReadOnly="True" Width="95" />
-                                        <DataGridTextColumn Header="Parent" Binding="{Binding ParentProductName}" IsReadOnly="True" Width="120" />
                                         <DataGridTextColumn Header="Notes" Binding="{Binding Notes, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="150" />
                                     </DataGrid.Columns>
                                 </DataGrid>
