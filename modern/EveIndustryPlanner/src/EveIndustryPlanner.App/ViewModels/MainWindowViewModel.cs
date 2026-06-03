@@ -6,7 +6,6 @@ using System.Windows;
 using System.Windows.Input;
 using EveIndustryPlanner.App;
 using EveIndustryPlanner.Core;
-using Microsoft.Win32;
 
 namespace EveIndustryPlanner.App.ViewModels;
 
@@ -21,6 +20,7 @@ public sealed class MainWindowViewModel : ObservableObject
     private readonly UserSettingsService userSettingsService;
     private readonly EveSsoCharacterAuthService characterAuthService = new();
     private readonly EveAssetService assetService;
+    private readonly PocketBaseDataService dataService;
     private readonly List<FacilityRigOption> allFacilityRigs = [];
 
     private string searchText = string.Empty;
@@ -71,6 +71,7 @@ public sealed class MainWindowViewModel : ObservableObject
     private int selectedWorkspaceTab;
     private string facilityCostIndexStatus = "Cost index uses ESI when available.";
     private bool isBusy;
+    private bool isApplyingServerData;
     private string statusText = "Ready";
     private ManufacturingResult? result;
     private ShoppingList? shoppingList;
@@ -79,6 +80,8 @@ public sealed class MainWindowViewModel : ObservableObject
     private readonly Dictionary<Guid, IReadOnlyList<ManufacturingResult>> productionLedgerSplitResults = new();
     private ProductionLedgerEntry? selectedProductionLedgerEntry;
     private Dictionary<string, ProductionJobCompletionState> productionJobCompletionStates = new(StringComparer.Ordinal);
+    private ProductionLedgerOption? selectedProductionLedger;
+    private string productionLedgerName = "Production Ledger";
     private ProductionPlannerScopeOption selectedProductionPlannerScope;
     private ProductionJobFilterOption selectedProductionJobFilter;
     private decimal maxManufacturingJobHours = 48m;
@@ -94,12 +97,6 @@ public sealed class MainWindowViewModel : ObservableObject
     private string marketScannerStatusText = "Scanner ready.";
     private string marketScannerProgressText = string.Empty;
     private readonly Dictionary<string, MarketScannerCacheEntry> marketScannerCache = new(StringComparer.Ordinal);
-
-    private static readonly JsonSerializerOptions LedgerJsonOptions = new()
-    {
-        PropertyNameCaseInsensitive = true,
-        WriteIndented = true
-    };
 
     private static readonly IReadOnlyList<string> DefaultCharacterScopes =
     [
@@ -143,6 +140,7 @@ public sealed class MainWindowViewModel : ObservableObject
         }
 
         SelectedCharacterAccount = account;
+        _ = LoadServerDataAsync();
     }
 
     private MainWindowViewModel(DefaultServices services)
@@ -168,7 +166,8 @@ public sealed class MainWindowViewModel : ObservableObject
         this.calculator = calculator;
         this.shoppingListService = shoppingListService;
         this.userSettingsService = userSettingsService ?? new UserSettingsService(GetSettingsFilePath());
-        assetService = new EveAssetService(characterAuthService);
+        assetService = new EveAssetService(() => PocketBaseUrl);
+        dataService = new PocketBaseDataService(() => PocketBaseUrl, () => SelectedCharacterAccount?.PocketBaseAuthToken ?? CharacterAccounts.FirstOrDefault()?.PocketBaseAuthToken ?? string.Empty);
 
         selectedFacilityStructure = FacilityStructures.First(option => option.Id == "raitaru");
         selectedFacilityService = CostIndexActivities.First(option => option.Role == FacilityServiceRole.Manufacturing);
@@ -204,8 +203,9 @@ public sealed class MainWindowViewModel : ObservableObject
         ClearProductionLedgerCommand = new RelayCommand(ClearProductionLedger, () => ProductionLedgerEntries.Count > 0);
         CopyProductionShoppingListCommand = new RelayCommand(CopyProductionShoppingList, () => ProductionLedgerShoppingListText.Length > 0);
         UseProductionAssetsCommand = new RelayCommand(UseProductionAssets, () => ProductionLedgerEntries.Count > 0 && CharacterAccounts.Count > 0);
-        SaveProductionLedgerCommand = new RelayCommand(SaveProductionLedger, () => ProductionLedgerEntries.Count > 0);
-        LoadProductionLedgerCommand = new RelayCommand(LoadProductionLedger);
+        NewProductionLedgerCommand = new RelayCommand(NewProductionLedger);
+        SaveProductionLedgerCommand = new AsyncRelayCommand(SaveProductionLedgerAsync, () => ProductionLedgerEntries.Count > 0 && SelectedCharacterAccount is not null);
+        LoadProductionLedgerCommand = new AsyncRelayCommand(LoadProductionLedgerAsync, () => SelectedCharacterAccount is not null);
         RecalculateProductionPlanCommand = new AsyncRelayCommand(RecalculateProductionLedgerPlanningAsync, () => ProductionLedgerEntries.Count > 0 && !IsBusy);
         SaveFacilityCommand = new RelayCommand(SaveFacility);
         NewFacilityCommand = new RelayCommand(NewFacility);
@@ -213,11 +213,11 @@ public sealed class MainWindowViewModel : ObservableObject
         SearchSolarSystemsCommand = new AsyncRelayCommand(SearchSolarSystemsAsync);
         RefreshCostIndexCommand = new AsyncRelayCommand(RefreshFacilityCostIndexAsync);
         AddCharacterCommand = new AsyncRelayCommand(AddCharacterAsync, () => !IsBusy);
-        RefreshCharacterTokenCommand = new AsyncRelayCommand(RefreshSelectedCharacterTokenAsync, () => SelectedCharacterAccount is not null && !IsBusy);
         DeleteCharacterCommand = new RelayCommand(DeleteSelectedCharacter, () => SelectedCharacterAccount is not null);
         RunMarketScannerCommand = new AsyncRelayCommand(RunMarketScannerAsync, () => !IsBusy && !IsMarketScannerBusy && blueprintCatalogProvider is not null);
         _ = SearchAsync();
         _ = SearchSolarSystemsAsync();
+        _ = LoadServerDataAsync();
     }
 
     public ObservableCollection<BlueprintSearchResult> Blueprints { get; } = [];
@@ -225,6 +225,8 @@ public sealed class MainWindowViewModel : ObservableObject
     public ObservableCollection<MaterialRequirement> Materials { get; } = [];
 
     public ObservableCollection<ProductionLedgerEntry> ProductionLedgerEntries { get; } = [];
+
+    public ObservableCollection<ProductionLedgerOption> ProductionLedgers { get; } = [];
 
     public ObservableCollection<ShoppingListLine> ProductionLedgerMaterials { get; } = [];
 
@@ -355,6 +357,8 @@ public sealed class MainWindowViewModel : ObservableObject
 
     public ICommand UseProductionAssetsCommand { get; }
 
+    public ICommand NewProductionLedgerCommand { get; }
+
     public ICommand SaveProductionLedgerCommand { get; }
 
     public ICommand LoadProductionLedgerCommand { get; }
@@ -372,8 +376,6 @@ public sealed class MainWindowViewModel : ObservableObject
     public ICommand RefreshCostIndexCommand { get; }
 
     public ICommand AddCharacterCommand { get; }
-
-    public ICommand RefreshCharacterTokenCommand { get; }
 
     public ICommand DeleteCharacterCommand { get; }
 
@@ -971,6 +973,7 @@ public sealed class MainWindowViewModel : ObservableObject
                 OnPropertyChanged(nameof(SelectedCharacterScopesText));
                 OnPropertyChanged(nameof(SelectedCharacterTokenText));
                 RaiseCharacterCommandStates();
+                RaiseProductionLedgerCommandStates();
             }
         }
     }
@@ -983,11 +986,8 @@ public sealed class MainWindowViewModel : ObservableObject
     public string SelectedCharacterTokenText =>
         SelectedCharacterAccount is null
             ? string.Empty
-            : SelectedCharacterAccount.TokenType == "PocketBase"
-                ? $"PocketBase auth: {MaskToken(SelectedCharacterAccount.AccessToken)}{Environment.NewLine}"
-                  + "ESI refresh token is stored server-side."
-                : $"Access: {MaskToken(SelectedCharacterAccount.AccessToken)}{Environment.NewLine}"
-                  + $"Refresh: {MaskToken(SelectedCharacterAccount.RefreshToken)}";
+            : $"PocketBase auth: {MaskToken(SelectedCharacterAccount.PocketBaseAuthToken)}{Environment.NewLine}"
+              + "EVE tokens are stored and refreshed server-side.";
 
     public string PocketBaseUrl
     {
@@ -1131,6 +1131,25 @@ public sealed class MainWindowViewModel : ObservableObject
                 RaiseProductionLedgerCommandStates();
             }
         }
+    }
+
+    public ProductionLedgerOption? SelectedProductionLedger
+    {
+        get => selectedProductionLedger;
+        set
+        {
+            if (SetProperty(ref selectedProductionLedger, value) && value is not null)
+            {
+                ProductionLedgerName = value.Name;
+                ApplyProductionLedgerDocument(value.Document, replaceExisting: true);
+            }
+        }
+    }
+
+    public string ProductionLedgerName
+    {
+        get => productionLedgerName;
+        set => SetProperty(ref productionLedgerName, string.IsNullOrWhiteSpace(value) ? "Production Ledger" : value);
     }
 
     public string ProductionLedgerShoppingListText => productionLedgerShoppingList.ToMultibuyText();
@@ -1414,6 +1433,16 @@ public sealed class MainWindowViewModel : ObservableObject
             return;
         }
 
+        var serverCache = await TryLoadServerMarketScannerCacheAsync(cacheKey);
+        if (serverCache is not null)
+        {
+            marketScannerCache[cacheKey] = new MarketScannerCacheEntry(DateTimeOffset.UtcNow, serverCache);
+            ApplyMarketScannerResults(serverCache);
+            MarketScannerStatusText = $"Loaded {serverCache.Count:N0} scanner rows from server cache.";
+            MarketScannerProgressText = "Server cache hit.";
+            return;
+        }
+
         IsBusy = true;
         IsMarketScannerBusy = true;
         StatusText = "Scanning market";
@@ -1496,6 +1525,7 @@ public sealed class MainWindowViewModel : ObservableObject
                 .ToList();
 
             marketScannerCache[cacheKey] = new MarketScannerCacheEntry(DateTimeOffset.UtcNow, orderedRows);
+            _ = SaveServerMarketScannerCacheAsync(cacheKey, orderedRows);
             ApplyMarketScannerResults(orderedRows);
             MarketScannerStatusText = $"Scanned {orderedRows.Count:N0} items. Results are cached for 5 minutes.";
             StatusText = "Market scan complete";
@@ -1656,6 +1686,11 @@ public sealed class MainWindowViewModel : ObservableObject
             return;
         }
 
+        if (SelectedProductionLedger is null && ProductionLedgerEntries.Count == 0)
+        {
+            ProductionLedgerName = $"Production Ledger {DateTime.Now:yyyy-MM-dd HH:mm}";
+        }
+
         var entry = new ProductionLedgerEntry(
             Guid.NewGuid(),
             DateTimeOffset.Now,
@@ -1681,6 +1716,21 @@ public sealed class MainWindowViewModel : ObservableObject
         RefreshProductionLedger();
         SelectedWorkspaceTab = 2;
         StatusText = $"Added to production ledger: {entry.ProductName}";
+    }
+
+    private void NewProductionLedger()
+    {
+        selectedProductionLedger = null;
+        OnPropertyChanged(nameof(SelectedProductionLedger));
+        ProductionLedgerName = $"Production Ledger {DateTime.Now:yyyy-MM-dd HH:mm}";
+        ProductionLedgerEntries.Clear();
+        productionLedgerAssetDeductions.Clear();
+        productionLedgerSplitResults.Clear();
+        productionJobCompletionStates.Clear();
+        SelectedProductionLedgerEntry = null;
+        RefreshProductionLedger();
+        SelectedWorkspaceTab = 2;
+        StatusText = "New production ledger started";
     }
 
     private void RemoveSelectedProductionEntry()
@@ -1760,126 +1810,162 @@ public sealed class MainWindowViewModel : ObservableObject
         StatusText = $"Applied {productionLedgerAssetDeductions.Values.Sum():N0} owned asset units to production ledger";
     }
 
-    private void SaveProductionLedger()
+    private async Task SaveProductionLedgerAsync()
     {
-        var dialog = new SaveFileDialog
-        {
-            Title = "Save production ledger",
-            Filter = "Production ledger (*.json)|*.json|JSON files (*.json)|*.json|All files (*.*)|*.*",
-            FileName = $"production-ledger-{DateTime.Now:yyyyMMdd-HHmm}.json"
-        };
-
-        if (dialog.ShowDialog() != true)
-        {
-            return;
-        }
-
         try
         {
-            var document = new ProductionLedgerDocument
-            {
-                SavedAt = DateTimeOffset.Now,
-                Settings = new ProductionPlannerSettings
-                {
-                    Scope = SelectedProductionPlannerScope.Scope,
-                    Filter = SelectedProductionJobFilter.Filter,
-                    MaxManufacturingJobHours = MaxManufacturingJobHours,
-                    MaxReactionJobHours = MaxReactionJobHours,
-                    MaxParallelManufacturingJobs = MaxParallelManufacturingJobs,
-                    MaxParallelReactionJobs = MaxParallelReactionJobs
-                },
-                Entries = ProductionLedgerEntries.ToList(),
-                JobStates = productionJobCompletionStates.Values
-                    .Where(state => state.IsCompleted || !string.IsNullOrWhiteSpace(state.Notes))
-                    .ToList()
-            };
-            using var stream = File.Create(dialog.FileName);
-            JsonSerializer.Serialize(stream, document, LedgerJsonOptions);
-            StatusText = $"Production ledger saved: {dialog.FileName}";
+            var document = CreateProductionLedgerDocument();
+            var ledgerId = await dataService.SaveProductionLedgerAsync(
+                SelectedProductionLedger?.Id ?? string.Empty,
+                ProductionLedgerName,
+                document);
+            UpsertProductionLedgerOption(new ProductionLedgerOption(ledgerId, ProductionLedgerName, document), select: true);
+            StatusText = "Production ledger saved to server";
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        catch (Exception ex) when (ex is InvalidOperationException or HttpRequestException or JsonException or TaskCanceledException)
         {
             StatusText = $"Could not save production ledger: {ex.Message}";
         }
     }
 
-    private void LoadProductionLedger()
+    private async Task<IReadOnlyList<MarketScannerResultRow>?> TryLoadServerMarketScannerCacheAsync(string cacheKey)
     {
-        var dialog = new OpenFileDialog
+        if (SelectedCharacterAccount is null && CharacterAccounts.Count == 0)
         {
-            Title = "Load production ledger",
-            Filter = "Production ledger (*.json)|*.json|JSON files (*.json)|*.json|All files (*.*)|*.*",
-            Multiselect = true
-        };
+            return null;
+        }
 
-        if (dialog.ShowDialog() != true)
+        try
+        {
+            var snapshot = await dataService.LoadSnapshotAsync();
+            var cacheEntry = snapshot?.MarketScanCache.FirstOrDefault(entry =>
+                entry.CacheKey == cacheKey && entry.ExpiresAt > DateTimeOffset.UtcNow);
+            return cacheEntry?.Rows;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or HttpRequestException or JsonException or TaskCanceledException)
+        {
+            return null;
+        }
+    }
+
+    private async Task SaveServerMarketScannerCacheAsync(string cacheKey, IReadOnlyList<MarketScannerResultRow> rows)
+    {
+        if (SelectedCharacterAccount is null && CharacterAccounts.Count == 0)
         {
             return;
         }
 
         try
         {
-            var loadedEntries = new List<ProductionLedgerEntry>();
-            var loadedJobStates = new List<ProductionJobCompletionState>();
-            ProductionPlannerSettings? lastSettings = null;
-
-            foreach (var fileName in dialog.FileNames)
-            {
-                using var stream = File.OpenRead(fileName);
-                var document = JsonSerializer.Deserialize<ProductionLedgerDocument>(stream, LedgerJsonOptions);
-                if (document is null)
-                {
-                    continue;
-                }
-
-                lastSettings = document.Settings;
-                loadedEntries.AddRange(document.Entries);
-                loadedJobStates.AddRange(document.JobStates);
-            }
-
-            if (lastSettings is not null)
-            {
-                SelectedProductionPlannerScope = ProductionPlannerScopes.FirstOrDefault(option => option.Scope == lastSettings.Scope)
-                    ?? ProductionPlannerScopes.First();
-                SelectedProductionJobFilter = ProductionJobFilters.FirstOrDefault(option => option.Filter == lastSettings.Filter)
-                    ?? ProductionJobFilters.First();
-                MaxManufacturingJobHours = lastSettings.MaxManufacturingJobHours;
-                MaxReactionJobHours = lastSettings.MaxReactionJobHours;
-                MaxParallelManufacturingJobs = lastSettings.MaxParallelManufacturingJobs;
-                MaxParallelReactionJobs = lastSettings.MaxParallelReactionJobs;
-            }
-
-            var loadedStatesByKey = loadedJobStates
-                .Where(state => !string.IsNullOrWhiteSpace(state.StableKey))
-                .GroupBy(state => state.StableKey, StringComparer.Ordinal)
-                .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
-            foreach (var state in loadedStatesByKey)
-            {
-                productionJobCompletionStates[state.Key] = state.Value;
-            }
-
-            var existingEntryIds = ProductionLedgerEntries.Select(entry => entry.Id).ToHashSet();
-            ProductionLedgerEntry? firstLoadedEntry = null;
-            foreach (var entry in loadedEntries)
-            {
-                if (!existingEntryIds.Add(entry.Id))
-                {
-                    entry.Id = Guid.NewGuid();
-                    existingEntryIds.Add(entry.Id);
-                }
-
-                ProductionLedgerEntries.Add(entry);
-                firstLoadedEntry ??= entry;
-            }
-
-            SelectedProductionLedgerEntry = firstLoadedEntry ?? ProductionLedgerEntries.FirstOrDefault();
-            RefreshProductionLedger();
-            SelectedWorkspaceTab = 2;
-            StatusText = $"Loaded {loadedEntries.Count:N0} production jobs from {dialog.FileNames.Length:N0} JSON file(s)";
+            await dataService.SaveMarketScanCacheAsync(cacheKey, DateTimeOffset.UtcNow.AddMinutes(5), rows);
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        catch (Exception ex) when (ex is InvalidOperationException or HttpRequestException or JsonException or TaskCanceledException)
+        {
+            MarketScannerStatusText = $"Scan complete; server cache save failed: {ex.Message}";
+        }
+    }
+
+    private async Task LoadProductionLedgerAsync()
+    {
+        try
+        {
+            var snapshot = await dataService.LoadSnapshotAsync();
+            if (snapshot is null || snapshot.ProductionLedgers.Count == 0)
+            {
+                StatusText = "No production ledger saved on server";
+                return;
+            }
+
+            LoadProductionLedgerOptions(snapshot.ProductionLedgers);
+            SelectedProductionLedger = ProductionLedgers.FirstOrDefault();
+            SelectedWorkspaceTab = 2;
+            StatusText = $"Loaded {ProductionLedgers.Count:N0} production ledgers from server";
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or HttpRequestException or JsonException or TaskCanceledException)
         {
             StatusText = $"Could not load production ledger: {ex.Message}";
+        }
+    }
+
+    private ServerProductionLedgerDocument CreateProductionLedgerDocument()
+    {
+        return new ServerProductionLedgerDocument
+        {
+            SavedAt = DateTimeOffset.Now,
+            Settings = new ProductionPlannerSettings
+            {
+                Scope = SelectedProductionPlannerScope.Scope,
+                Filter = SelectedProductionJobFilter.Filter,
+                MaxManufacturingJobHours = MaxManufacturingJobHours,
+                MaxReactionJobHours = MaxReactionJobHours,
+                MaxParallelManufacturingJobs = MaxParallelManufacturingJobs,
+                MaxParallelReactionJobs = MaxParallelReactionJobs
+            },
+            Entries = ProductionLedgerEntries.ToList(),
+            JobStates = productionJobCompletionStates.Values
+                .Where(state => state.IsCompleted || !string.IsNullOrWhiteSpace(state.Notes))
+                .ToList()
+        };
+    }
+
+    private void ApplyProductionLedgerDocument(ServerProductionLedgerDocument document, bool replaceExisting)
+    {
+        if (replaceExisting)
+        {
+            ProductionLedgerEntries.Clear();
+            productionLedgerAssetDeductions.Clear();
+            productionLedgerSplitResults.Clear();
+            productionJobCompletionStates.Clear();
+        }
+
+        SelectedProductionPlannerScope = ProductionPlannerScopes.FirstOrDefault(option => option.Scope == document.Settings.Scope)
+            ?? ProductionPlannerScopes.First();
+        SelectedProductionJobFilter = ProductionJobFilters.FirstOrDefault(option => option.Filter == document.Settings.Filter)
+            ?? ProductionJobFilters.First();
+        MaxManufacturingJobHours = document.Settings.MaxManufacturingJobHours;
+        MaxReactionJobHours = document.Settings.MaxReactionJobHours;
+        MaxParallelManufacturingJobs = document.Settings.MaxParallelManufacturingJobs;
+        MaxParallelReactionJobs = document.Settings.MaxParallelReactionJobs;
+
+        foreach (var state in document.JobStates.Where(state => !string.IsNullOrWhiteSpace(state.StableKey)))
+        {
+            productionJobCompletionStates[state.StableKey] = state;
+        }
+
+        foreach (var entry in document.Entries)
+        {
+            ProductionLedgerEntries.Add(entry);
+        }
+
+        SelectedProductionLedgerEntry = ProductionLedgerEntries.FirstOrDefault();
+        RefreshProductionLedger();
+    }
+
+    private void LoadProductionLedgerOptions(IReadOnlyList<ServerProductionLedgerRecord> records)
+    {
+        ProductionLedgers.Clear();
+        foreach (var record in records.OrderBy(record => record.Name, StringComparer.OrdinalIgnoreCase))
+        {
+            ProductionLedgers.Add(new ProductionLedgerOption(record.Id, record.Name, record.Ledger));
+        }
+    }
+
+    private void UpsertProductionLedgerOption(ProductionLedgerOption option, bool select)
+    {
+        var existing = ProductionLedgers.FirstOrDefault(ledger => ledger.Id == option.Id);
+        if (existing is null)
+        {
+            ProductionLedgers.Add(option);
+        }
+        else
+        {
+            var index = ProductionLedgers.IndexOf(existing);
+            ProductionLedgers[index] = option;
+        }
+
+        if (select)
+        {
+            SelectedProductionLedger = option;
         }
     }
 
@@ -2327,9 +2413,14 @@ public sealed class MainWindowViewModel : ObservableObject
             useAssetsCommand.RaiseCanExecuteChanged();
         }
 
-        if (SaveProductionLedgerCommand is RelayCommand saveCommand)
+        if (SaveProductionLedgerCommand is AsyncRelayCommand saveCommand)
         {
             saveCommand.RaiseCanExecuteChanged();
+        }
+
+        if (LoadProductionLedgerCommand is AsyncRelayCommand loadCommand)
+        {
+            loadCommand.RaiseCanExecuteChanged();
         }
 
         if (RecalculateProductionPlanCommand is AsyncRelayCommand recalculateCommand)
@@ -2351,11 +2442,6 @@ public sealed class MainWindowViewModel : ObservableObject
         if (AddCharacterCommand is AsyncRelayCommand addCommand)
         {
             addCommand.RaiseCanExecuteChanged();
-        }
-
-        if (RefreshCharacterTokenCommand is AsyncRelayCommand refreshCommand)
-        {
-            refreshCommand.RaiseCanExecuteChanged();
         }
 
         if (DeleteCharacterCommand is RelayCommand deleteCommand)
@@ -2889,12 +2975,10 @@ public sealed class MainWindowViewModel : ObservableObject
         {
             IsBusy = true;
             StatusText = "Waiting for EVE SSO login";
-            var token = string.IsNullOrWhiteSpace(PocketBaseUrl)
-                ? await characterAuthService.AddCharacterAsync(DefaultCharacterScopes)
-                : await characterAuthService.AddCharacterViaPocketBaseAsync(
-                    PocketBaseUrl,
-                    DefaultCharacterScopes,
-                    SelectedCharacterAccount?.TokenType == "PocketBase" ? SelectedCharacterAccount.AccessToken : null);
+            var token = await characterAuthService.AddCharacterViaPocketBaseAsync(
+                PocketBaseUrl,
+                DefaultCharacterScopes,
+                SelectedCharacterAccount?.PocketBaseAuthToken);
             UpsertCharacterAccount(token);
             SaveUserSettings();
             StatusText = $"Character added: {token.CharacterName}";
@@ -2902,38 +2986,6 @@ public sealed class MainWindowViewModel : ObservableObject
         catch (Exception ex)
         {
             StatusText = $"Could not add character: {ex.Message}";
-        }
-        finally
-        {
-            IsBusy = false;
-        }
-    }
-
-    private async Task RefreshSelectedCharacterTokenAsync()
-    {
-        if (SelectedCharacterAccount is null)
-        {
-            return;
-        }
-
-        try
-        {
-            if (SelectedCharacterAccount.TokenType == "PocketBase")
-            {
-                StatusText = "PocketBase-linked ESI tokens are refreshed server-side";
-                return;
-            }
-
-            IsBusy = true;
-            StatusText = $"Refreshing token: {SelectedCharacterAccount.CharacterName}";
-            var token = await characterAuthService.RefreshAccessTokenAsync(SelectedCharacterAccount.ToSaved());
-            UpsertCharacterAccount(token, SelectedCharacterAccount.AddedAt);
-            SaveUserSettings();
-            StatusText = $"Token refreshed: {token.CharacterName}";
-        }
-        catch (Exception ex)
-        {
-            StatusText = $"Could not refresh token: {ex.Message}";
         }
         finally
         {
@@ -2960,11 +3012,8 @@ public sealed class MainWindowViewModel : ObservableObject
         var account = new CharacterAccountOption(
             token.CharacterId,
             token.CharacterName,
-            token.AccessToken,
-            token.RefreshToken,
-            token.TokenType,
+            token.PocketBaseAuthToken,
             token.Scopes.OrderBy(scope => scope, StringComparer.Ordinal).ToList(),
-            DateTimeOffset.UtcNow.AddSeconds(Math.Max(0, token.ExpiresIn)),
             existingAddedAt ?? DateTimeOffset.UtcNow,
             DateTimeOffset.UtcNow);
 
@@ -3001,6 +3050,94 @@ public sealed class MainWindowViewModel : ObservableObject
         return FacilitySecurityBands.First(option => option.SecurityBand == securityBand);
     }
 
+    private async Task LoadServerDataAsync()
+    {
+        if (SelectedCharacterAccount is null && CharacterAccounts.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            var snapshot = await dataService.LoadSnapshotAsync();
+            if (snapshot is null)
+            {
+                return;
+            }
+
+            isApplyingServerData = true;
+            if (snapshot.Facilities.Count > 0)
+            {
+                LoadFacilityProfiles(new UserSettings { FacilityProfiles = snapshot.Facilities });
+            }
+
+            if (snapshot.Settings is not null)
+            {
+                ApplyServerUserSettings(snapshot.Settings);
+            }
+
+            if (snapshot.ProductionLedgers.Count > 0)
+            {
+                LoadProductionLedgerOptions(snapshot.ProductionLedgers);
+                if (ProductionLedgerEntries.Count == 0)
+                {
+                    SelectedProductionLedger = ProductionLedgers.FirstOrDefault();
+                }
+            }
+
+            foreach (var cacheEntry in snapshot.MarketScanCache.Where(entry => entry.ExpiresAt > DateTimeOffset.UtcNow))
+            {
+                marketScannerCache[cacheEntry.CacheKey] = new MarketScannerCacheEntry(DateTimeOffset.UtcNow, cacheEntry.Rows);
+            }
+
+            StatusText = "Server data loaded";
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or HttpRequestException or JsonException or TaskCanceledException)
+        {
+            StatusText = $"Could not load server data: {ex.Message}";
+        }
+        finally
+        {
+            isApplyingServerData = false;
+        }
+    }
+
+    private void ApplyServerUserSettings(ServerUserSettings settings)
+    {
+        selectedMaterialMarket = FindMarketLocation(settings.MaterialMarketLocationId);
+        selectedProductMarket = FindMarketLocation(settings.ProductMarketLocationId);
+        selectedMaterialPriceStrategy = FindMaterialPriceStrategy(settings.MaterialPriceSelection);
+        selectedProductPriceStrategy = FindProductPriceStrategy(settings.ProductPriceSelection);
+        selectedBuildBuyDepth = FindBuildBuyDepth(settings.BuildBuyDepth);
+        EnableBuildBuy = settings.EnableBuildBuy;
+        MaxBuildBuyDepth = settings.MaxBuildBuyDepth;
+        SelectedFinalProductFacility = FindFacility(settings.FinalProductFacilityId);
+        SelectedComponentFacility = FindFacility(settings.ComponentFacilityId);
+        SelectedReactionFacility = FindFacility(settings.ReactionFacilityId);
+        OnPropertyChanged(nameof(SelectedMaterialMarket));
+        OnPropertyChanged(nameof(SelectedProductMarket));
+        OnPropertyChanged(nameof(SelectedMaterialPriceStrategy));
+        OnPropertyChanged(nameof(SelectedProductPriceStrategy));
+        OnPropertyChanged(nameof(SelectedBuildBuyDepth));
+    }
+
+    private ServerUserSettings CreateServerUserSettings()
+    {
+        return new ServerUserSettings
+        {
+            FinalProductFacilityId = SelectedFinalProductFacility.Id,
+            ComponentFacilityId = SelectedComponentFacility.Id,
+            ReactionFacilityId = SelectedReactionFacility.Id,
+            MaterialMarketLocationId = SelectedMaterialMarket.LocationId,
+            ProductMarketLocationId = SelectedProductMarket.LocationId,
+            MaterialPriceSelection = SelectedMaterialPriceStrategy.Selection,
+            ProductPriceSelection = SelectedProductPriceStrategy.Selection,
+            EnableBuildBuy = EnableBuildBuy,
+            BuildBuyDepth = SelectedBuildBuyDepth.Depth,
+            MaxBuildBuyDepth = MaxBuildBuyDepth
+        };
+    }
+
     private void SaveUserSettings()
     {
         userSettingsService.Save(new UserSettings
@@ -3019,6 +3156,33 @@ public sealed class MainWindowViewModel : ObservableObject
             MaxBuildBuyDepth = MaxBuildBuyDepth,
             PocketBaseUrl = PocketBaseUrl
         });
+
+        if (!isApplyingServerData)
+        {
+            _ = SaveServerUserDataAsync();
+        }
+    }
+
+    private async Task SaveServerUserDataAsync()
+    {
+        if (SelectedCharacterAccount is null && CharacterAccounts.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            await dataService.SaveSettingsAsync(CreateServerUserSettings());
+            await dataService.SaveFacilitiesAsync(
+                FacilityProfiles
+                    .Where(profile => profile.Id != SavedFacilityProfile.NoneId)
+                    .Select(profile => profile.ToSaved())
+                    .ToList());
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or HttpRequestException or JsonException or TaskCanceledException)
+        {
+            StatusText = $"Could not save server settings: {ex.Message}";
+        }
     }
 
     private sealed record DefaultServices(
@@ -3036,6 +3200,8 @@ public sealed class MainWindowViewModel : ObservableObject
     public sealed record MarketPriceStrategyOption(string Name, MarketPriceSelection Selection);
 
     public sealed record BuildBuyDepthOption(string Name, BuildBuyDepth Depth);
+
+    public sealed record ProductionLedgerOption(string Id, string Name, ServerProductionLedgerDocument Document);
 
     public enum ProductionPlannerScope
     {
@@ -3103,18 +3269,14 @@ public sealed class MainWindowViewModel : ObservableObject
     public sealed record CharacterAccountOption(
         long CharacterId,
         string CharacterName,
-        string AccessToken,
-        string RefreshToken,
-        string TokenType,
+        string PocketBaseAuthToken,
         IReadOnlyList<string> Scopes,
-        DateTimeOffset AccessTokenExpiresAt,
         DateTimeOffset AddedAt,
         DateTimeOffset UpdatedAt)
     {
-        public string TokenExpiresText => TokenType == "PocketBase" ? "Server managed" : AccessTokenExpiresAt.ToLocalTime().ToString("g");
+        public string TokenExpiresText => "Server managed";
         public string AddedAtText => AddedAt.ToLocalTime().ToString("g");
         public string ScopesPreview => Scopes.Count == 0 ? "No scopes" : string.Join(", ", Scopes.Take(3)) + (Scopes.Count > 3 ? $" +{Scopes.Count - 3}" : string.Empty);
-        public bool HasRefreshToken => !string.IsNullOrWhiteSpace(RefreshToken);
 
         public SavedCharacterAccount ToSaved()
         {
@@ -3122,11 +3284,8 @@ public sealed class MainWindowViewModel : ObservableObject
             {
                 CharacterId = CharacterId,
                 CharacterName = CharacterName,
-                AccessToken = AccessToken,
-                RefreshToken = RefreshToken,
-                TokenType = TokenType,
+                PocketBaseAuthToken = PocketBaseAuthToken,
                 Scopes = Scopes.ToList(),
-                AccessTokenExpiresAt = AccessTokenExpiresAt,
                 AddedAt = AddedAt,
                 UpdatedAt = UpdatedAt
             };
@@ -3137,11 +3296,8 @@ public sealed class MainWindowViewModel : ObservableObject
             return new CharacterAccountOption(
                 account.CharacterId,
                 account.CharacterName,
-                account.AccessToken,
-                account.RefreshToken,
-                account.TokenType,
+                account.PocketBaseAuthToken,
                 account.Scopes,
-                account.AccessTokenExpiresAt,
                 account.AddedAt,
                 account.UpdatedAt);
         }
@@ -3414,7 +3570,7 @@ public sealed class MainWindowViewModel : ObservableObject
         DateTimeOffset? CompletedAt,
         string Notes);
 
-    private sealed class ProductionPlannerSettings
+    public sealed class ProductionPlannerSettings
     {
         public ProductionPlannerScope Scope { get; init; } = ProductionPlannerScope.AllLedgerItems;
         public ProductionJobFilter Filter { get; init; } = ProductionJobFilter.Open;
@@ -3422,14 +3578,6 @@ public sealed class MainWindowViewModel : ObservableObject
         public decimal MaxReactionJobHours { get; init; } = 24m;
         public int MaxParallelManufacturingJobs { get; init; } = 10;
         public int MaxParallelReactionJobs { get; init; } = 5;
-    }
-
-    private sealed class ProductionLedgerDocument
-    {
-        public DateTimeOffset SavedAt { get; init; }
-        public ProductionPlannerSettings Settings { get; init; } = new();
-        public List<ProductionLedgerEntry> Entries { get; init; } = [];
-        public List<ProductionJobCompletionState> JobStates { get; init; } = [];
     }
 
     public sealed record FacilityOption(

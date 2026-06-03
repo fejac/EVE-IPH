@@ -95,11 +95,8 @@ public sealed class SavedCharacterAccount
 {
     public long CharacterId { get; init; }
     public string CharacterName { get; init; } = string.Empty;
-    public string AccessToken { get; init; } = string.Empty;
-    public string RefreshToken { get; init; } = string.Empty;
-    public string TokenType { get; init; } = "Bearer";
+    public string PocketBaseAuthToken { get; init; } = string.Empty;
     public List<string> Scopes { get; init; } = [];
-    public DateTimeOffset AccessTokenExpiresAt { get; init; }
     public DateTimeOffset AddedAt { get; init; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAt { get; init; } = DateTimeOffset.UtcNow;
 }

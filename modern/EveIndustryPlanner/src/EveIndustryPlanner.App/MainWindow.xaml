@@ -485,6 +485,12 @@
 
                             <StackPanel>
                                 <TextBlock Text="Production Jobs" FontSize="16" FontWeight="SemiBold" />
+                                <TextBlock Text="Saved Ledger" FontSize="12" Foreground="#526176" Margin="0,8,0,0" />
+                                <ComboBox ItemsSource="{Binding ProductionLedgers}"
+                                          SelectedItem="{Binding SelectedProductionLedger}"
+                                          DisplayMemberPath="Name" />
+                                <TextBlock Text="Ledger Name" FontSize="12" Foreground="#526176" Margin="0,8,0,0" />
+                                <TextBox Text="{Binding ProductionLedgerName, UpdateSourceTrigger=PropertyChanged}" />
                                 <TextBlock Text="{Binding ProductionLedgerSummaryText}"
                                            Foreground="#526176"
                                            FontSize="12"
@@ -512,11 +518,14 @@
                                 <Button Content="Clear"
                                         Margin="6,0,0,6"
                                         Command="{Binding ClearProductionLedgerCommand}" />
-                                <Button Content="Save JSON"
+                                <Button Content="New Ledger"
                                         Margin="0,6,6,0"
-                                        Command="{Binding SaveProductionLedgerCommand}" />
-                                <Button Content="Load / Merge JSON"
+                                        Command="{Binding NewProductionLedgerCommand}" />
+                                <Button Content="Save Ledger"
                                         Margin="6,6,0,0"
+                                        Command="{Binding SaveProductionLedgerCommand}" />
+                                <Button Content="Load Ledgers"
+                                        Margin="0,6,6,0"
                                         Command="{Binding LoadProductionLedgerCommand}" />
                             </UniformGrid>
                         </Grid>
@@ -895,9 +904,6 @@
                                     <Button Content="Add Character"
                                             Command="{Binding AddCharacterCommand}"
                                             Margin="0,0,8,0" />
-                                    <Button Content="Refresh Token"
-                                            Command="{Binding RefreshCharacterTokenCommand}"
-                                            Margin="0,0,8,0" />
                                     <Button Content="Remove"
                                             Command="{Binding DeleteCharacterCommand}" />
                                 </StackPanel>
@@ -914,7 +920,7 @@
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Header="Character" Binding="{Binding CharacterName}" Width="*" />
                                     <DataGridTextColumn Header="Character ID" Binding="{Binding CharacterId}" Width="130" />
-                                    <DataGridTextColumn Header="Token Expires" Binding="{Binding TokenExpiresText}" Width="150" />
+                                    <DataGridTextColumn Header="Token Storage" Binding="{Binding TokenExpiresText}" Width="150" />
                                     <DataGridTextColumn Header="Added" Binding="{Binding AddedAtText}" Width="150" />
                                     <DataGridTextColumn Header="Scopes" Binding="{Binding ScopesPreview}" Width="260" />
                                 </DataGrid.Columns>
@@ -941,7 +947,7 @@
                                 <TextBlock Text="{Binding SelectedCharacterAccount.CharacterId}"
                                            Foreground="#526176"
                                            Margin="0,2,0,8" />
-                                <TextBlock Text="Stored Token Preview" FontSize="12" Foreground="#526176" />
+                                <TextBlock Text="Server Auth Preview" FontSize="12" Foreground="#526176" />
                                 <TextBox Text="{Binding SelectedCharacterTokenText, Mode=OneWay}"
                                          IsReadOnly="True"
                                          AcceptsReturn="True"

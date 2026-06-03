@@ -8,7 +8,7 @@ using System.Text.Json.Serialization;
 
 namespace EveIndustryPlanner.App;
 
-public sealed class EveAssetService(EveSsoCharacterAuthService authService)
+public sealed class EveAssetService(Func<string> pocketBaseUrlProvider)
 {
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -17,6 +17,7 @@ public sealed class EveAssetService(EveSsoCharacterAuthService authService)
     };
 
     private readonly HttpClient httpClient = new();
+    private readonly Dictionary<long, EveAccessToken> accessTokenCache = [];
 
     public async Task<IReadOnlyList<CachedEveAsset>> LoadAllCharacterAssetsAsync(
         IReadOnlyList<SavedCharacterAccount> accounts,
@@ -108,20 +109,19 @@ public sealed class EveAssetService(EveSsoCharacterAuthService authService)
     private async Task<IReadOnlyList<EsiAssetDto>> FetchCharacterAssetsAsync(SavedCharacterAccount account, CancellationToken cancellationToken)
     {
         var assets = new List<EsiAssetDto>();
-        var accessToken = account.AccessToken;
         var page = 1;
         var pages = 1;
+        var accessToken = await GetEveAccessTokenAsync(account, forceRefresh: false, cancellationToken).ConfigureAwait(false);
 
         do
         {
-            using var request = CreateAssetRequest(account.CharacterId, accessToken, page);
+            using var request = CreateAssetRequest(account.CharacterId, accessToken.AccessToken, page);
             using var response = await httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
 
             if (response.StatusCode == HttpStatusCode.Unauthorized)
             {
-                var refreshed = await authService.RefreshAccessTokenAsync(account, cancellationToken).ConfigureAwait(false);
-                accessToken = refreshed.AccessToken;
-                using var retryRequest = CreateAssetRequest(account.CharacterId, accessToken, page);
+                accessToken = await GetEveAccessTokenAsync(account, forceRefresh: true, cancellationToken).ConfigureAwait(false);
+                using var retryRequest = CreateAssetRequest(account.CharacterId, accessToken.AccessToken, page);
                 using var retryResponse = await httpClient.SendAsync(retryRequest, cancellationToken).ConfigureAwait(false);
                 retryResponse.EnsureSuccessStatusCode();
                 pages = GetPageCount(retryResponse);
@@ -144,13 +144,13 @@ public sealed class EveAssetService(EveSsoCharacterAuthService authService)
     private async Task<IReadOnlyList<EsiAssetDto>> FetchCorporationAssetsAsync(SavedCharacterAccount account, long corporationId, CancellationToken cancellationToken)
     {
         var assets = new List<EsiAssetDto>();
-        var accessToken = account.AccessToken;
         var page = 1;
         var pages = 1;
+        var accessToken = await GetEveAccessTokenAsync(account, forceRefresh: false, cancellationToken).ConfigureAwait(false);
 
         do
         {
-            using var request = CreateCorporationAssetRequest(corporationId, accessToken, page);
+            using var request = CreateCorporationAssetRequest(corporationId, accessToken.AccessToken, page);
             using var response = await httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
 
             if (response.StatusCode == HttpStatusCode.Forbidden || response.StatusCode == HttpStatusCode.NotFound)
@@ -160,9 +160,8 @@ public sealed class EveAssetService(EveSsoCharacterAuthService authService)
 
             if (response.StatusCode == HttpStatusCode.Unauthorized)
             {
-                var refreshed = await authService.RefreshAccessTokenAsync(account, cancellationToken).ConfigureAwait(false);
-                accessToken = refreshed.AccessToken;
-                using var retryRequest = CreateCorporationAssetRequest(corporationId, accessToken, page);
+                accessToken = await GetEveAccessTokenAsync(account, forceRefresh: true, cancellationToken).ConfigureAwait(false);
+                using var retryRequest = CreateCorporationAssetRequest(corporationId, accessToken.AccessToken, page);
                 using var retryResponse = await httpClient.SendAsync(retryRequest, cancellationToken).ConfigureAwait(false);
                 if (retryResponse.StatusCode == HttpStatusCode.Forbidden || retryResponse.StatusCode == HttpStatusCode.NotFound)
                 {
@@ -388,16 +387,17 @@ public sealed class EveAssetService(EveSsoCharacterAuthService authService)
         IEnumerable<long> itemIds,
         CancellationToken cancellationToken)
     {
+        var accessToken = await GetEveAccessTokenAsync(account, forceRefresh: false, cancellationToken).ConfigureAwait(false);
         var payload = JsonSerializer.Serialize(itemIds);
-        var response = await SendAssetNamesRequestAsync(account.CharacterId, account.AccessToken, payload, cancellationToken).ConfigureAwait(false);
+        var response = await SendAssetNamesRequestAsync(account.CharacterId, accessToken.AccessToken, payload, cancellationToken).ConfigureAwait(false);
         if (response.StatusCode != HttpStatusCode.Unauthorized)
         {
             return response;
         }
 
         response.Dispose();
-        var refreshed = await authService.RefreshAccessTokenAsync(account, cancellationToken).ConfigureAwait(false);
-        return await SendAssetNamesRequestAsync(account.CharacterId, refreshed.AccessToken, payload, cancellationToken).ConfigureAwait(false);
+        accessToken = await GetEveAccessTokenAsync(account, forceRefresh: true, cancellationToken).ConfigureAwait(false);
+        return await SendAssetNamesRequestAsync(account.CharacterId, accessToken.AccessToken, payload, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<HttpResponseMessage> SendAssetNamesRequestAsync(
@@ -420,16 +420,17 @@ public sealed class EveAssetService(EveSsoCharacterAuthService authService)
         IEnumerable<long> itemIds,
         CancellationToken cancellationToken)
     {
+        var accessToken = await GetEveAccessTokenAsync(account, forceRefresh: false, cancellationToken).ConfigureAwait(false);
         var payload = JsonSerializer.Serialize(itemIds);
-        var response = await SendCorporationAssetNamesRequestAsync(corporationId, account.AccessToken, payload, cancellationToken).ConfigureAwait(false);
+        var response = await SendCorporationAssetNamesRequestAsync(corporationId, accessToken.AccessToken, payload, cancellationToken).ConfigureAwait(false);
         if (response.StatusCode != HttpStatusCode.Unauthorized)
         {
             return response;
         }
 
         response.Dispose();
-        var refreshed = await authService.RefreshAccessTokenAsync(account, cancellationToken).ConfigureAwait(false);
-        return await SendCorporationAssetNamesRequestAsync(corporationId, refreshed.AccessToken, payload, cancellationToken).ConfigureAwait(false);
+        accessToken = await GetEveAccessTokenAsync(account, forceRefresh: true, cancellationToken).ConfigureAwait(false);
+        return await SendCorporationAssetNamesRequestAsync(corporationId, accessToken.AccessToken, payload, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<HttpResponseMessage> SendCorporationAssetNamesRequestAsync(
@@ -524,15 +525,16 @@ public sealed class EveAssetService(EveSsoCharacterAuthService authService)
         long structureId,
         CancellationToken cancellationToken)
     {
-        var response = await SendStructureRequestAsync(structureId, account.AccessToken, cancellationToken).ConfigureAwait(false);
+        var accessToken = await GetEveAccessTokenAsync(account, forceRefresh: false, cancellationToken).ConfigureAwait(false);
+        var response = await SendStructureRequestAsync(structureId, accessToken.AccessToken, cancellationToken).ConfigureAwait(false);
         if (response.StatusCode != HttpStatusCode.Unauthorized)
         {
             return response;
         }
 
         response.Dispose();
-        var refreshed = await authService.RefreshAccessTokenAsync(account, cancellationToken).ConfigureAwait(false);
-        return await SendStructureRequestAsync(structureId, refreshed.AccessToken, cancellationToken).ConfigureAwait(false);
+        accessToken = await GetEveAccessTokenAsync(account, forceRefresh: true, cancellationToken).ConfigureAwait(false);
+        return await SendStructureRequestAsync(structureId, accessToken.AccessToken, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<HttpResponseMessage> SendStructureRequestAsync(
@@ -545,6 +547,60 @@ public sealed class EveAssetService(EveSsoCharacterAuthService authService)
             $"https://esi.evetech.net/latest/universe/structures/{structureId}/?datasource=tranquility");
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
         return await httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<EveAccessToken> GetEveAccessTokenAsync(
+        SavedCharacterAccount account,
+        bool forceRefresh,
+        CancellationToken cancellationToken)
+    {
+        if (!forceRefresh
+            && accessTokenCache.TryGetValue(account.CharacterId, out var cached)
+            && cached.ExpiresAt > DateTimeOffset.UtcNow.AddMinutes(1))
+        {
+            return cached;
+        }
+
+        using var request = CreatePocketBaseRequest(
+            account,
+            HttpMethod.Get,
+            $"/api/eve-industry/auth/eve/access-token/{account.CharacterId}");
+        using var response = await httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        response.EnsureSuccessStatusCode();
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+        var token = await JsonSerializer.DeserializeAsync<EveAccessTokenResponse>(stream, JsonOptions, cancellationToken).ConfigureAwait(false);
+        if (token is null || string.IsNullOrWhiteSpace(token.AccessToken))
+        {
+            throw new InvalidOperationException("PocketBase did not return a valid EVE access token.");
+        }
+
+        var accessToken = new EveAccessToken(
+            token.AccessToken,
+            token.ExpiresAt);
+        accessTokenCache[account.CharacterId] = accessToken;
+        return accessToken;
+    }
+
+    private HttpRequestMessage CreatePocketBaseRequest(
+        SavedCharacterAccount account,
+        HttpMethod method,
+        string path)
+    {
+        var baseUrl = pocketBaseUrlProvider().Trim();
+        if (string.IsNullOrWhiteSpace(baseUrl))
+        {
+            throw new InvalidOperationException("PocketBase server URL is not configured.");
+        }
+
+        var builder = new UriBuilder(new Uri(new Uri(EnsureTrailingSlash(baseUrl)), path.TrimStart('/')));
+        var request = new HttpRequestMessage(method, builder.Uri);
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", account.PocketBaseAuthToken);
+        return request;
+    }
+
+    private static string EnsureTrailingSlash(string value)
+    {
+        return value.EndsWith("/", StringComparison.Ordinal) ? value : value + "/";
     }
 
     private async Task<long> FetchCharacterCorporationIdAsync(long characterId, CancellationToken cancellationToken)
@@ -713,6 +769,17 @@ public sealed class EveAssetService(EveSsoCharacterAuthService authService)
     private sealed record StructureInfo(string Name, long SolarSystemId);
 
     private sealed record StationInfo(string Name, long SolarSystemId);
+
+    private sealed record EveAccessToken(string AccessToken, DateTimeOffset ExpiresAt);
+
+    private sealed class EveAccessTokenResponse
+    {
+        [JsonPropertyName("access_token")]
+        public string AccessToken { get; init; } = string.Empty;
+
+        [JsonPropertyName("expires_at")]
+        public DateTimeOffset ExpiresAt { get; init; }
+    }
 }
 
 public sealed class CachedEveAsset

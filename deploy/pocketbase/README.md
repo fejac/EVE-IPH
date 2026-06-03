@@ -86,4 +86,24 @@ POST /api/eve-industry/auth/eve/callback
 
 `TOKEN_ENCRYPTION_KEY` must be exactly 32 characters because PocketBase `$security.encrypt` uses AES-256-GCM.
 
-The hook file is currently a placeholder so the deployment is usable immediately. The custom EVE auth endpoint should be added before moving refresh-token storage to the server.
+Private ESI data loading still runs from the desktop app directly to ESI. The desktop app sends a small authenticated request to:
+
+```text
+GET /api/eve-industry/auth/eve/access-token/{characterId}
+```
+
+PocketBase decrypts the stored EVE token bundle, refreshes it when needed, and returns a short-lived EVE access token. The large ESI asset, structure, and name responses flow directly from ESI to the desktop app, not through PocketBase.
+
+## App Data Storage
+
+The desktop app stores user-owned planning data through custom authenticated routes:
+
+- `GET /api/eve-industry/data/snapshot`
+- `PUT /api/eve-industry/data/settings`
+- `PUT /api/eve-industry/data/facilities`
+- `PUT /api/eve-industry/data/production-ledger`
+- `PUT /api/eve-industry/data/market-scan-cache`
+
+These routes write to `user_settings`, `facilities`, `production_ledgers`, and `market_scan_cache`. They only store planner data and cached calculation rows; ESI bulk loading remains client-side.
+
+`production_ledgers` stores multiple named ledgers per user. The desktop app loads the saved ledger list from the snapshot route, lets the user select an active ledger, and saves the active ledger back by record id.

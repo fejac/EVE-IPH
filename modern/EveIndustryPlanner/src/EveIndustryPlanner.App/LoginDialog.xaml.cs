@@ -83,11 +83,8 @@ public partial class LoginDialog : Window
         {
             CharacterId = token.CharacterId,
             CharacterName = token.CharacterName,
-            AccessToken = token.AccessToken,
-            RefreshToken = token.RefreshToken,
-            TokenType = token.TokenType,
+            PocketBaseAuthToken = token.PocketBaseAuthToken,
             Scopes = token.Scopes.ToList(),
-            AccessTokenExpiresAt = DateTimeOffset.UtcNow.AddSeconds(Math.Max(0, token.ExpiresIn)),
             AddedAt = DateTimeOffset.UtcNow,
             UpdatedAt = DateTimeOffset.UtcNow
         };
@@ -107,11 +104,8 @@ public partial class LoginDialog : Window
         {
             CharacterId = account.CharacterId,
             CharacterName = account.CharacterName,
-            AccessToken = account.AccessToken,
-            RefreshToken = account.RefreshToken,
-            TokenType = account.TokenType,
+            PocketBaseAuthToken = account.PocketBaseAuthToken,
             Scopes = account.Scopes,
-            AccessTokenExpiresAt = account.AccessTokenExpiresAt,
             AddedAt = existingAddedAt ?? account.AddedAt,
             UpdatedAt = DateTimeOffset.UtcNow
         });
