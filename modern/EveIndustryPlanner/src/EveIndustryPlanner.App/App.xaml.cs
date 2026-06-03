@@ -26,6 +26,9 @@ public partial class App : Application
         loadingWindow.SetStatus("Loading local SDE and saved planner data");
         await Task.Delay(75);
 
+        await SdeDownloadService.EnsureAvailableAsync(new Progress<string>(loadingWindow.SetStatus));
+        await Task.Delay(75);
+
         var viewModel = new MainWindowViewModel(loginDialog.AuthenticatedAccount);
         await viewModel.InitializeAsync(new Progress<string>(loadingWindow.SetStatus));
 

@@ -2980,6 +2980,7 @@ public sealed class MainWindowViewModel : ObservableObject
     {
         var candidates = new[]
         {
+            SdeDownloadService.DefaultSdeDirectory,
             Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "sde")),
             Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "src", "sde")),
             Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, "src", "sde")),
