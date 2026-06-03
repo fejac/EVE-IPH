@@ -5,7 +5,7 @@ namespace EveIndustryPlanner.App;
 
 public partial class App : Application
 {
-    protected override void OnStartup(StartupEventArgs e)
+    protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
 
@@ -18,9 +18,24 @@ public partial class App : Application
             return;
         }
 
-        var mainWindow = new MainWindow(new MainWindowViewModel(loginDialog.AuthenticatedAccount));
+        var loadingWindow = new LoadingWindow();
+        loadingWindow.SetStatus("Preparing planner workspace");
+        loadingWindow.Show();
+        await Task.Delay(75);
+
+        loadingWindow.SetStatus("Loading local SDE and saved planner data");
+        await Task.Delay(75);
+
+        var viewModel = new MainWindowViewModel(loginDialog.AuthenticatedAccount);
+        await viewModel.InitializeAsync(new Progress<string>(loadingWindow.SetStatus));
+
+        loadingWindow.SetStatus("Opening workspace");
+        await Task.Delay(75);
+
+        var mainWindow = new MainWindow(viewModel);
         MainWindow = mainWindow;
         ShutdownMode = ShutdownMode.OnMainWindowClose;
         mainWindow.Show();
+        loadingWindow.Close();
     }
 }

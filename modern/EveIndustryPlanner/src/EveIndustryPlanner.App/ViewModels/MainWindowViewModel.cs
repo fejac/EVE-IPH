@@ -141,7 +141,6 @@ public sealed class MainWindowViewModel : ObservableObject
         }
 
         SelectedCharacterAccount = account;
-        _ = LoadServerDataAsync();
     }
 
     private MainWindowViewModel(DefaultServices services)
@@ -217,9 +216,18 @@ public sealed class MainWindowViewModel : ObservableObject
         AddCharacterCommand = new AsyncRelayCommand(AddCharacterAsync, () => !IsBusy);
         DeleteCharacterCommand = new RelayCommand(DeleteSelectedCharacter, () => SelectedCharacterAccount is not null);
         RunMarketScannerCommand = new AsyncRelayCommand(RunMarketScannerAsync, () => !IsBusy && !IsMarketScannerBusy && blueprintCatalogProvider is not null);
-        _ = SearchAsync();
-        _ = SearchSolarSystemsAsync();
-        _ = LoadServerDataAsync();
+    }
+
+    public async Task InitializeAsync(IProgress<string>? progress = null)
+    {
+        progress?.Report("Loading SDE blueprint data");
+        await SearchAsync();
+
+        progress?.Report("Loading solar system data");
+        await SearchSolarSystemsAsync();
+
+        progress?.Report("Loading server-synced planner data");
+        await LoadServerDataAsync();
     }
 
     public ObservableCollection<BlueprintSearchResult> Blueprints { get; } = [];
@@ -1301,11 +1309,12 @@ public sealed class MainWindowViewModel : ObservableObject
     private async Task SearchAsync()
     {
         IsBusy = true;
-        StatusText = "Searching blueprints";
+        StatusText = "Loading SDE blueprint data";
 
         try
         {
             var results = await blueprintRepository.SearchAsync(SearchText, CancellationToken.None);
+            StatusText = "Preparing blueprint search results";
             Blueprints.Clear();
             foreach (var blueprint in results)
             {

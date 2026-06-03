@@ -979,7 +979,7 @@
         </TabControl>
 
         <TextBlock Grid.Row="2"
-                   Text="MVP uses local SDE data, Fuzzworks prices, and local settings."
+                   Text="Uses local SDE data, Fuzzworks prices, and server-synced planner data."
                    Foreground="#526176"
                    Margin="0,10,0,0" />
     </Grid>
