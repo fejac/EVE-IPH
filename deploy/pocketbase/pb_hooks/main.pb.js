@@ -22,6 +22,10 @@ routerAdd("PUT", "/api/eve-industry/data/production-ledger", function(e) {
   return require(__hooks + "/eve-industry.js")().routeSaveProductionLedger(e);
 }, $apis.requireAuth("users"));
 
+routerAdd("DELETE", "/api/eve-industry/data/production-ledger/{ledgerId}", function(e) {
+  return require(__hooks + "/eve-industry.js")().routeDeleteProductionLedger(e);
+}, $apis.requireAuth("users"));
+
 routerAdd("PUT", "/api/eve-industry/data/market-scan-cache", function(e) {
   return require(__hooks + "/eve-industry.js")().routeSaveMarketScanCache(e);
 }, $apis.requireAuth("users"));

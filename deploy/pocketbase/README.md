@@ -102,6 +102,7 @@ The desktop app stores user-owned planning data through custom authenticated rou
 - `PUT /api/eve-industry/data/settings`
 - `PUT /api/eve-industry/data/facilities`
 - `PUT /api/eve-industry/data/production-ledger`
+- `DELETE /api/eve-industry/data/production-ledger/{ledgerId}`
 - `PUT /api/eve-industry/data/market-scan-cache`
 
 These routes write to `user_settings`, `facilities`, `production_ledgers`, and `market_scan_cache`. They only store planner data and cached calculation rows; ESI bulk loading remains client-side.

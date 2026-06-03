@@ -72,6 +72,7 @@ public sealed class MainWindowViewModel : ObservableObject
     private string facilityCostIndexStatus = "Cost index uses ESI when available.";
     private bool isBusy;
     private bool isApplyingServerData;
+    private CancellationTokenSource? productionLedgerAutoSave;
     private string statusText = "Ready";
     private ManufacturingResult? result;
     private ShoppingList? shoppingList;
@@ -206,6 +207,7 @@ public sealed class MainWindowViewModel : ObservableObject
         NewProductionLedgerCommand = new RelayCommand(NewProductionLedger);
         SaveProductionLedgerCommand = new AsyncRelayCommand(SaveProductionLedgerAsync, () => ProductionLedgerEntries.Count > 0 && SelectedCharacterAccount is not null);
         LoadProductionLedgerCommand = new AsyncRelayCommand(LoadProductionLedgerAsync, () => SelectedCharacterAccount is not null);
+        DeleteProductionLedgerCommand = new AsyncRelayCommand(DeleteProductionLedgerAsync, () => SelectedProductionLedger is not null && SelectedCharacterAccount is not null);
         RecalculateProductionPlanCommand = new AsyncRelayCommand(RecalculateProductionLedgerPlanningAsync, () => ProductionLedgerEntries.Count > 0 && !IsBusy);
         SaveFacilityCommand = new RelayCommand(SaveFacility);
         NewFacilityCommand = new RelayCommand(NewFacility);
@@ -362,6 +364,8 @@ public sealed class MainWindowViewModel : ObservableObject
     public ICommand SaveProductionLedgerCommand { get; }
 
     public ICommand LoadProductionLedgerCommand { get; }
+
+    public ICommand DeleteProductionLedgerCommand { get; }
 
     public ICommand RecalculateProductionPlanCommand { get; }
 
@@ -1140,8 +1144,18 @@ public sealed class MainWindowViewModel : ObservableObject
         {
             if (SetProperty(ref selectedProductionLedger, value) && value is not null)
             {
-                ProductionLedgerName = value.Name;
-                ApplyProductionLedgerDocument(value.Document, replaceExisting: true);
+                isApplyingServerData = true;
+                try
+                {
+                    ProductionLedgerName = value.Name;
+                    ApplyProductionLedgerDocument(value.Document, replaceExisting: true);
+                }
+                finally
+                {
+                    isApplyingServerData = false;
+                }
+
+                RaiseProductionLedgerCommandStates();
             }
         }
     }
@@ -1149,7 +1163,13 @@ public sealed class MainWindowViewModel : ObservableObject
     public string ProductionLedgerName
     {
         get => productionLedgerName;
-        set => SetProperty(ref productionLedgerName, string.IsNullOrWhiteSpace(value) ? "Production Ledger" : value);
+        set
+        {
+            if (SetProperty(ref productionLedgerName, string.IsNullOrWhiteSpace(value) ? "Production Ledger" : value))
+            {
+                ScheduleProductionLedgerAutoSave();
+            }
+        }
     }
 
     public string ProductionLedgerShoppingListText => productionLedgerShoppingList.ToMultibuyText();
@@ -1716,6 +1736,7 @@ public sealed class MainWindowViewModel : ObservableObject
         RefreshProductionLedger();
         SelectedWorkspaceTab = 2;
         StatusText = $"Added to production ledger: {entry.ProductName}";
+        ScheduleProductionLedgerAutoSave();
     }
 
     private void NewProductionLedger()
@@ -1747,6 +1768,7 @@ public sealed class MainWindowViewModel : ObservableObject
         SelectedProductionLedgerEntry = ProductionLedgerEntries.FirstOrDefault();
         RefreshProductionLedger();
         StatusText = $"Removed from production ledger: {removed.ProductName}";
+        ScheduleProductionLedgerAutoSave();
     }
 
     private void ClearProductionLedger()
@@ -1758,6 +1780,7 @@ public sealed class MainWindowViewModel : ObservableObject
         SelectedProductionLedgerEntry = null;
         RefreshProductionLedger();
         StatusText = "Production ledger cleared";
+        ScheduleProductionLedgerAutoSave();
     }
 
     private void CopyProductionShoppingList()
@@ -1828,6 +1851,48 @@ public sealed class MainWindowViewModel : ObservableObject
         }
     }
 
+    private void ScheduleProductionLedgerAutoSave()
+    {
+        if (isApplyingServerData || SelectedCharacterAccount is null || ProductionLedgerEntries.Count == 0)
+        {
+            return;
+        }
+
+        productionLedgerAutoSave?.Cancel();
+        productionLedgerAutoSave?.Dispose();
+        productionLedgerAutoSave = new CancellationTokenSource();
+        var token = productionLedgerAutoSave.Token;
+        _ = AutoSaveProductionLedgerAsync(token);
+    }
+
+    private async Task AutoSaveProductionLedgerAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(1500), cancellationToken);
+            if (cancellationToken.IsCancellationRequested || ProductionLedgerEntries.Count == 0 || SelectedCharacterAccount is null)
+            {
+                return;
+            }
+
+            var document = CreateProductionLedgerDocument();
+            var ledgerId = await dataService.SaveProductionLedgerAsync(
+                SelectedProductionLedger?.Id ?? string.Empty,
+                ProductionLedgerName,
+                document,
+                cancellationToken);
+            UpsertProductionLedgerOption(new ProductionLedgerOption(ledgerId, ProductionLedgerName, document), select: true);
+            StatusText = $"Production ledger autosaved: {ProductionLedgerName}";
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or HttpRequestException or JsonException or TaskCanceledException)
+        {
+            StatusText = $"Could not autosave production ledger: {ex.Message}";
+        }
+    }
+
     private async Task<IReadOnlyList<MarketScannerResultRow>?> TryLoadServerMarketScannerCacheAsync(string cacheKey)
     {
         if (SelectedCharacterAccount is null && CharacterAccounts.Count == 0)
@@ -1884,6 +1949,27 @@ public sealed class MainWindowViewModel : ObservableObject
         catch (Exception ex) when (ex is InvalidOperationException or HttpRequestException or JsonException or TaskCanceledException)
         {
             StatusText = $"Could not load production ledger: {ex.Message}";
+        }
+    }
+
+    private async Task DeleteProductionLedgerAsync()
+    {
+        if (SelectedProductionLedger is null)
+        {
+            return;
+        }
+
+        var deleted = SelectedProductionLedger;
+        try
+        {
+            await dataService.DeleteProductionLedgerAsync(deleted.Id);
+            ProductionLedgers.Remove(deleted);
+            NewProductionLedger();
+            StatusText = $"Production ledger deleted: {deleted.Name}";
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or HttpRequestException or JsonException or TaskCanceledException)
+        {
+            StatusText = $"Could not delete production ledger: {ex.Message}";
         }
     }
 
@@ -2218,6 +2304,7 @@ public sealed class MainWindowViewModel : ObservableObject
             row.Notes);
         OnPropertyChanged(nameof(ProductionJobPlanSummaryText));
         OnPropertyChanged(nameof(ProductionJobPlanWarningsText));
+        ScheduleProductionLedgerAutoSave();
     }
 
     private bool JobMatchesFilter(PlannedProductionJobRow row)
@@ -2282,6 +2369,7 @@ public sealed class MainWindowViewModel : ObservableObject
             }
 
             RefreshProductionLedger();
+            ScheduleProductionLedgerAutoSave();
             StatusText = "Production ledger recalculated";
         }
         catch (Exception ex)
@@ -2421,6 +2509,11 @@ public sealed class MainWindowViewModel : ObservableObject
         if (LoadProductionLedgerCommand is AsyncRelayCommand loadCommand)
         {
             loadCommand.RaiseCanExecuteChanged();
+        }
+
+        if (DeleteProductionLedgerCommand is AsyncRelayCommand deleteLedgerCommand)
+        {
+            deleteLedgerCommand.RaiseCanExecuteChanged();
         }
 
         if (RecalculateProductionPlanCommand is AsyncRelayCommand recalculateCommand)

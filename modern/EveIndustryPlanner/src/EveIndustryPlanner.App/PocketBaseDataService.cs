@@ -56,6 +56,13 @@ public sealed class PocketBaseDataService(Func<string> pocketBaseUrlProvider, Fu
         return saveResponse?.Id ?? ledgerId;
     }
 
+    public async Task DeleteProductionLedgerAsync(string ledgerId, CancellationToken cancellationToken = default)
+    {
+        using var request = CreateRequest(HttpMethod.Delete, $"/api/eve-industry/data/production-ledger/{Uri.EscapeDataString(ledgerId)}");
+        using var response = await httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        await EnsureSuccessAsync(response, cancellationToken).ConfigureAwait(false);
+    }
+
     public Task SaveMarketScanCacheAsync(string cacheKey, DateTimeOffset expiresAt, IReadOnlyList<MainWindowViewModel.MarketScannerResultRow> rows, CancellationToken cancellationToken = default)
     {
         return SendJsonAsync(

@@ -423,6 +423,25 @@ module.exports = function() {
     return e.json(200, { ok: true, id: record.id });
   }
 
+  function routeDeleteProductionLedger(e) {
+    try {
+      var user = requireUser(e);
+      var ledgerId = asString(e.request.pathValue("ledgerId"));
+      var record = $app.findRecordById("production_ledgers", ledgerId);
+      if (record.getString("user") !== user.id) {
+        throw new ForbiddenError("This production ledger is not owned by the authenticated user.");
+      }
+
+      $app.delete(record);
+      return e.json(200, { ok: true });
+    } catch (err) {
+      return e.json(400, {
+        error: "production_ledger_delete_failed",
+        message: String(err && err.message ? err.message : err)
+      });
+    }
+  }
+
   function routeSaveMarketScanCache(e) {
     var user = requireUser(e);
     var body = e.requestInfo().body || {};
@@ -451,6 +470,7 @@ module.exports = function() {
     routeSaveSettings: routeSaveSettings,
     routeSaveFacilities: routeSaveFacilities,
     routeSaveProductionLedger: routeSaveProductionLedger,
+    routeDeleteProductionLedger: routeDeleteProductionLedger,
     routeSaveMarketScanCache: routeSaveMarketScanCache
   };
 };
