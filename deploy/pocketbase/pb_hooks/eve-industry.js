@@ -310,7 +310,7 @@ module.exports = function() {
   }
 
   function findOwnedRecords(collectionName, userId) {
-    return $app.findRecordsByFilter(collectionName, "user = '" + String(userId).replace(/'/g, "''") + "'", "-updated", 200, 0);
+    return $app.findRecordsByFilter(collectionName, "user = '" + String(userId).replace(/'/g, "''") + "'", "", 200, 0);
   }
 
   function saveSingletonJson(collectionName, jsonField, userId, value) {
