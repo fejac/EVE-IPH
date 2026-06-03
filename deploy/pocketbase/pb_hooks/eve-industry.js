@@ -320,7 +320,7 @@ module.exports = function() {
       record.set("user", userId);
     }
 
-    record.set(jsonField, value || {});
+    record.set(jsonField, JSON.parse(JSON.stringify(value || {})));
     $app.save(record);
     return record;
   }
@@ -355,30 +355,44 @@ module.exports = function() {
   }
 
   function routeSaveSettings(e) {
-    var user = requireUser(e);
-    var body = e.requestInfo().body || {};
-    saveSingletonJson("user_settings", "settings", user.id, body.settings || body);
-    return e.json(200, { ok: true });
+    try {
+      var user = requireUser(e);
+      var body = e.requestInfo().body || {};
+      saveSingletonJson("user_settings", "settings", user.id, body.settings || body);
+      return e.json(200, { ok: true });
+    } catch (err) {
+      return e.json(400, {
+        error: "settings_save_failed",
+        message: String(err && err.message ? err.message : err)
+      });
+    }
   }
 
   function routeSaveFacilities(e) {
-    var user = requireUser(e);
-    var body = e.requestInfo().body || {};
-    var profiles = body.facilities || [];
-    var existing = findOwnedRecords("facilities", user.id);
-    existing.forEach(function(record) {
-      $app.delete(record);
-    });
+    try {
+      var user = requireUser(e);
+      var body = e.requestInfo().body || {};
+      var profiles = body.facilities || [];
+      var existing = findOwnedRecords("facilities", user.id);
+      existing.forEach(function(record) {
+        $app.delete(record);
+      });
 
-    profiles.forEach(function(profile) {
-      var record = new Record($app.findCollectionByNameOrId("facilities"));
-      record.set("user", user.id);
-      record.set("name", asString(profile.Name || profile.name || "Facility"));
-      record.set("profile", profile);
-      $app.save(record);
-    });
+      profiles.forEach(function(profile) {
+        var record = new Record($app.findCollectionByNameOrId("facilities"));
+        record.set("user", user.id);
+        record.set("name", asString(profile.Name || profile.name || "Facility"));
+        record.set("profile", JSON.parse(JSON.stringify(profile)));
+        $app.save(record);
+      });
 
-    return e.json(200, { ok: true });
+      return e.json(200, { ok: true });
+    } catch (err) {
+      return e.json(400, {
+        error: "facilities_save_failed",
+        message: String(err && err.message ? err.message : err)
+      });
+    }
   }
 
   function routeSaveProductionLedger(e) {

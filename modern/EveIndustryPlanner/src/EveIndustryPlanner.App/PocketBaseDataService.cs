@@ -50,7 +50,7 @@ public sealed class PocketBaseDataService(Func<string> pocketBaseUrlProvider, Fu
             Encoding.UTF8,
             "application/json");
         using var response = await httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
-        response.EnsureSuccessStatusCode();
+        await EnsureSuccessAsync(response, cancellationToken).ConfigureAwait(false);
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
         var saveResponse = await JsonSerializer.DeserializeAsync<SaveRecordResponse>(stream, JsonOptions, cancellationToken).ConfigureAwait(false);
         return saveResponse?.Id ?? ledgerId;
@@ -75,7 +75,35 @@ public sealed class PocketBaseDataService(Func<string> pocketBaseUrlProvider, Fu
         using var request = CreateRequest(method, path);
         request.Content = new StringContent(JsonSerializer.Serialize(payload, JsonOptions), Encoding.UTF8, "application/json");
         using var response = await httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
-        response.EnsureSuccessStatusCode();
+        await EnsureSuccessAsync(response, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task EnsureSuccessAsync(HttpResponseMessage response, CancellationToken cancellationToken)
+    {
+        if (response.IsSuccessStatusCode)
+        {
+            return;
+        }
+
+        var responseText = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(responseText))
+        {
+            response.EnsureSuccessStatusCode();
+        }
+
+        try
+        {
+            using var json = JsonDocument.Parse(responseText);
+            if (json.RootElement.TryGetProperty("message", out var message))
+            {
+                throw new HttpRequestException(message.GetString() ?? responseText);
+            }
+        }
+        catch (JsonException)
+        {
+        }
+
+        throw new HttpRequestException(responseText);
     }
 
     private HttpRequestMessage CreateRequest(HttpMethod method, string path)

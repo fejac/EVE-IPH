@@ -3173,6 +3173,15 @@ public sealed class MainWindowViewModel : ObservableObject
         try
         {
             await dataService.SaveSettingsAsync(CreateServerUserSettings());
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or HttpRequestException or JsonException or TaskCanceledException)
+        {
+            StatusText = $"Could not save server settings: {ex.Message}";
+            return;
+        }
+
+        try
+        {
             await dataService.SaveFacilitiesAsync(
                 FacilityProfiles
                     .Where(profile => profile.Id != SavedFacilityProfile.NoneId)
@@ -3181,7 +3190,7 @@ public sealed class MainWindowViewModel : ObservableObject
         }
         catch (Exception ex) when (ex is InvalidOperationException or HttpRequestException or JsonException or TaskCanceledException)
         {
-            StatusText = $"Could not save server settings: {ex.Message}";
+            StatusText = $"Could not save server facilities: {ex.Message}";
         }
     }
 
