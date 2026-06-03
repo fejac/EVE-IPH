@@ -1,5 +1,6 @@
-using System.Net.Http.Headers;
 using System.Net.Http;
+using System.Globalization;
+using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -14,7 +15,7 @@ public sealed class PocketBaseDataService(Func<string> pocketBaseUrlProvider, Fu
     {
         PropertyNameCaseInsensitive = true,
         WriteIndented = true,
-        Converters = { new JsonStringEnumConverter() }
+        Converters = { new JsonStringEnumConverter(), new PocketBaseDateTimeOffsetConverter() }
     };
 
     private readonly HttpClient httpClient = new();
@@ -130,6 +131,34 @@ public sealed class PocketBaseDataService(Func<string> pocketBaseUrlProvider, Fu
     private static string EnsureTrailingSlash(string value)
     {
         return value.EndsWith("/", StringComparison.Ordinal) ? value : value + "/";
+    }
+}
+
+internal sealed class PocketBaseDateTimeOffsetConverter : JsonConverter<DateTimeOffset>
+{
+    public override DateTimeOffset Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        var value = reader.GetString();
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            throw new JsonException("Expected a non-empty date/time value.");
+        }
+
+        if (DateTimeOffset.TryParse(
+                value,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+                out var parsed))
+        {
+            return parsed;
+        }
+
+        throw new JsonException($"Could not parse date/time value '{value}'.");
+    }
+
+    public override void Write(Utf8JsonWriter writer, DateTimeOffset value, JsonSerializerOptions options)
+    {
+        writer.WriteStringValue(value.ToString("O", CultureInfo.InvariantCulture));
     }
 }
 
