@@ -27,7 +27,6 @@ public sealed class MainWindowViewModel : ObservableObject
     private BlueprintSearchResult? selectedBlueprint;
     private int runs = 1;
     private int lines = 1;
-    private int finalMaxRunsPerJob;
     private int materialEfficiency = 10;
     private int timeEfficiency = 20;
     private decimal additionalCosts;
@@ -427,12 +426,6 @@ public sealed class MainWindowViewModel : ObservableObject
     {
         get => lines;
         set => SetProperty(ref lines, Math.Max(1, value));
-    }
-
-    public int FinalMaxRunsPerJob
-    {
-        get => finalMaxRunsPerJob;
-        set => SetProperty(ref finalMaxRunsPerJob, Math.Max(0, value));
     }
 
     public int MaterialEfficiency
@@ -1092,7 +1085,7 @@ public sealed class MainWindowViewModel : ObservableObject
 
     public string MaterialAuditSummaryText => Result is null
         ? string.Empty
-        : $"{Result.Materials.Count:N0} materials | {Result.Materials.Count(material => material.MissingPrice):N0} missing prices | {Result.Materials.Count(material => !material.HasEnoughMarketVolume):N0} low instant-buy volume";
+        : $"{Materials.Count:N0} materials | {Materials.Count(material => material.MissingPrice):N0} missing prices | {Materials.Count(material => !material.HasEnoughMarketVolume):N0} low instant-buy volume";
 
     public string CalculationBreakdownText => Result is null
         ? string.Empty
@@ -1392,13 +1385,14 @@ public sealed class MainWindowViewModel : ObservableObject
             Result = await calculator.CalculateAsync(CreateManufacturingRequest(SelectedBlueprint.BlueprintId), CancellationToken.None);
 
             Materials.Clear();
-            foreach (var material in Result.Materials)
+            foreach (var material in AggregateMaterialsForDisplay(Result.Materials))
             {
                 Materials.Add(material);
             }
 
             shoppingList = shoppingListService.CreateFromManufacturingResult(Result);
             OnPropertyChanged(nameof(ShoppingListText));
+            OnPropertyChanged(nameof(MaterialAuditSummaryText));
             StatusText = "Calculation complete";
         }
         catch (Exception ex)
@@ -1414,10 +1408,59 @@ public sealed class MainWindowViewModel : ObservableObject
 
     private ManufacturingRequest CreateManufacturingRequest(BlueprintId blueprintId)
     {
-        return CreateManufacturingRequest(blueprintId, Runs, Lines, MaterialEfficiency, TimeEfficiency, AdditionalCosts);
+        return CreateManufacturingRequest(
+            blueprintId,
+            Runs,
+            Lines,
+            MaterialEfficiency,
+            TimeEfficiency,
+            AdditionalCosts,
+            MaxManufacturingJobHours,
+            MaxReactionJobHours);
     }
 
-    private ManufacturingRequest CreateManufacturingRequest(BlueprintId blueprintId, int requestRuns, int requestLines, int requestMaterialEfficiency, int requestTimeEfficiency, decimal requestAdditionalCosts)
+    private static IReadOnlyList<MaterialRequirement> AggregateMaterialsForDisplay(IEnumerable<MaterialRequirement> materials)
+    {
+        return materials
+            .GroupBy(material => new { material.TypeId, material.Name })
+            .Select(group =>
+            {
+                var groupMaterials = group.ToList();
+                var quantity = groupMaterials.Sum(material => material.Quantity);
+                var totalPrice = groupMaterials.Sum(material => material.TotalPrice);
+                var hasEnoughMarketVolume = groupMaterials.All(material => material.HasEnoughMarketVolume);
+                var missingPrice = groupMaterials.Any(material => material.MissingPrice);
+
+                return new MaterialRequirement
+                {
+                    TypeId = group.Key.TypeId,
+                    Name = group.Key.Name,
+                    Quantity = quantity,
+                    UnitPrice = quantity == 0 ? 0m : totalPrice / quantity,
+                    TotalVolume = groupMaterials.Sum(material => material.TotalVolume),
+                    Category = groupMaterials.First().Category,
+                    MissingPrice = missingPrice,
+                    HasEnoughMarketVolume = hasEnoughMarketVolume,
+                    MarketFilledQuantity = groupMaterials.Sum(material => material.MarketFilledQuantity),
+                    Calculation = groupMaterials.Count == 1 ? groupMaterials[0].Calculation : new MaterialCalculationBreakdown(),
+                    CalculationOverrideText = groupMaterials.Count == 1
+                        ? string.Empty
+                        : $"{groupMaterials.Count:N0} job lines summed; total keeps per-job rounding"
+                };
+            })
+            .OrderBy(material => material.Name)
+            .ToList();
+    }
+
+    private ManufacturingRequest CreateManufacturingRequest(
+        BlueprintId blueprintId,
+        int requestRuns,
+        int requestLines,
+        int requestMaterialEfficiency,
+        int requestTimeEfficiency,
+        decimal requestAdditionalCosts,
+        decimal requestMaxManufacturingJobHours = 0,
+        decimal requestMaxReactionJobHours = 0)
     {
         return new ManufacturingRequest
         {
@@ -1441,7 +1484,9 @@ public sealed class MainWindowViewModel : ObservableObject
                 MaterialMarketLocationName = SelectedMaterialMarket.Name,
                 ProductMarketLocationId = SelectedProductMarket.LocationId,
                 ProductMarketLocationName = SelectedProductMarket.Name
-            }
+            },
+            MaxManufacturingJobHours = requestMaxManufacturingJobHours,
+            MaxReactionJobHours = requestMaxReactionJobHours
         };
     }
 
@@ -1585,7 +1630,8 @@ public sealed class MainWindowViewModel : ObservableObject
             MarketScannerMaxItems,
             Runs,
             Lines,
-            FinalMaxRunsPerJob,
+            MaxManufacturingJobHours,
+            MaxReactionJobHours,
             MaterialEfficiency,
             TimeEfficiency,
             AdditionalCosts,
@@ -1735,10 +1781,7 @@ public sealed class MainWindowViewModel : ObservableObject
             SelectedFinalProductFacility.Name,
             SelectedComponentFacility.Name,
             SelectedReactionFacility.Name,
-            Result)
-        {
-            MaxRunsPerJob = FinalMaxRunsPerJob
-        };
+            Result);
 
         ProductionLedgerEntries.Add(entry);
         SelectedProductionLedgerEntry = entry;
@@ -2160,7 +2203,6 @@ public sealed class MainWindowViewModel : ObservableObject
                         entry.ProductName,
                         job,
                         maxDepth - job.Depth + 1,
-                        hasSplitResults ? 0 : job.BlueprintId.Value == entry.BlueprintId ? entry.MaxRunsPerJob : 0,
                         hasSplitResults ? resultIndex : -1,
                         jobIndex));
                 });
@@ -2180,7 +2222,6 @@ public sealed class MainWindowViewModel : ObservableObject
                 source.Requirement.TimePerRun,
                 source.DependencyStage,
                 source.Requirement.Depth,
-                source.MaxRunsPerJob,
                 source.SplitGroupIndex,
                 source.JobIndex))
             .OrderBy(requirement => requirement.DependencyStage)
@@ -2226,7 +2267,7 @@ public sealed class MainWindowViewModel : ObservableObject
             currentIndex++;
             jobCounters[groupKey] = currentIndex;
 
-            var stableKey = $"{requirement.BlueprintId.Value}:{requirement.ActivityType}:{requirement.FacilityName}:{requirement.DependencyStage}:{requirement.MaxRunsPerJob}:{requirement.SplitGroupIndex}:{requirement.JobIndex}:{expanded.SplitIndex}";
+            var stableKey = $"{requirement.BlueprintId.Value}:{requirement.ActivityType}:{requirement.FacilityName}:{requirement.DependencyStage}:{requirement.SplitGroupIndex}:{requirement.JobIndex}:{expanded.SplitIndex}";
             productionJobCompletionStates.TryGetValue(stableKey, out var state);
             var row = new PlannedProductionJobRow(
                 stableKey,
@@ -2348,18 +2389,13 @@ public sealed class MainWindowViewModel : ObservableObject
             productionLedgerSplitResults.Clear();
             foreach (var entry in ProductionLedgerEntries)
             {
-                if (entry.MaxRunsPerJob <= 0 || entry.Runs <= entry.MaxRunsPerJob)
-                {
-                    continue;
-                }
-
                 var splitResults = new List<ManufacturingResult>();
                 for (var lineIndex = 0; lineIndex < entry.Lines; lineIndex++)
                 {
                     var remainingRuns = entry.Runs;
                     while (remainingRuns > 0)
                     {
-                        var chunkRuns = Math.Min(entry.MaxRunsPerJob, remainingRuns);
+                        var chunkRuns = remainingRuns;
                         var chunkAdditionalCosts = entry.Result.AdditionalCosts * chunkRuns / (entry.Runs * entry.Lines);
                         splitResults.Add(await calculator.CalculateAsync(
                             CreateManufacturingRequest(
@@ -2368,13 +2404,18 @@ public sealed class MainWindowViewModel : ObservableObject
                                 1,
                                 entry.MaterialEfficiency,
                                 entry.TimeEfficiency,
-                                chunkAdditionalCosts),
+                                chunkAdditionalCosts,
+                                MaxManufacturingJobHours,
+                                MaxReactionJobHours),
                             CancellationToken.None));
                         remainingRuns -= chunkRuns;
                     }
                 }
 
-                productionLedgerSplitResults[entry.Id] = splitResults;
+                if (splitResults.Count > 0)
+                {
+                    productionLedgerSplitResults[entry.Id] = splitResults;
+                }
             }
 
             RefreshProductionLedger();
@@ -2595,7 +2636,6 @@ public sealed class MainWindowViewModel : ObservableObject
                 $"{entry.OutputText}",
                 $"Added: {entry.AddedAt.LocalDateTime:g}",
                 $"Runs/job: {entry.Runs:N0} / Lines: {entry.Lines:N0} / ME {entry.MaterialEfficiency} / TE {entry.TimeEfficiency}",
-                $"Max runs per final job: {(entry.MaxRunsPerJob > 0 ? entry.MaxRunsPerJob.ToString("N0") : "unlimited")}",
                 $"Markets: buy {entry.MaterialMarketName} / sell {entry.ProductMarketName}",
                 $"Facilities: final {entry.FinalProductFacilityName} / components {entry.ComponentFacilityName} / reactions {entry.ReactionFacilityName}",
                 string.Empty,
@@ -3470,9 +3510,8 @@ public sealed class MainWindowViewModel : ObservableObject
         public string ComponentFacilityName { get; set; } = string.Empty;
         public string ReactionFacilityName { get; set; } = string.Empty;
         public ManufacturingResult Result { get; set; } = new();
-        public int MaxRunsPerJob { get; set; }
         public string OutputText => $"{Result.OutputQuantity:N0} x {ProductName}";
-        public string SummaryText => $"{Runs:N0} runs/job x {Lines:N0} lines / cost {Result.TotalCost:N2} ISK / profit {Result.Profit:N2} ISK{(MaxRunsPerJob > 0 ? $" / max {MaxRunsPerJob:N0} runs/job" : string.Empty)}";
+        public string SummaryText => $"{Runs:N0} runs/job x {Lines:N0} lines / cost {Result.TotalCost:N2} ISK / profit {Result.Profit:N2} ISK";
     }
 
     public sealed record MarketScannerResultRow(
@@ -3535,7 +3574,6 @@ public sealed class MainWindowViewModel : ObservableObject
         string SourceProductName,
         ProductionJobRequirement Requirement,
         int DependencyStage,
-        int MaxRunsPerJob,
         int SplitGroupIndex,
         int JobIndex);
 
@@ -3554,7 +3592,6 @@ public sealed class MainWindowViewModel : ObservableObject
         TimeSpan TimePerRun,
         int DependencyStage,
         int Depth,
-        int MaxRunsPerJob,
         int SplitGroupIndex,
         int JobIndex);
 

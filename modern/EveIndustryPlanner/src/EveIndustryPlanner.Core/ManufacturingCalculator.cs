@@ -101,6 +101,36 @@ public sealed class ManufacturingCalculator(
         return TimeSpan.FromSeconds((double)Math.Max(1m, seconds));
     }
 
+    private static IReadOnlyList<int> SplitRunsByJobDuration(
+        BlueprintActivityType activityType,
+        int totalRuns,
+        TimeSpan timePerRun,
+        ManufacturingRequest request)
+    {
+        var maxJobHours = activityType == BlueprintActivityType.Reaction
+            ? request.MaxReactionJobHours
+            : request.MaxManufacturingJobHours;
+
+        if (totalRuns <= 1 || maxJobHours <= 0 || timePerRun <= TimeSpan.Zero)
+        {
+            return [Math.Max(1, totalRuns)];
+        }
+
+        var runsPerJob = (int)Math.Floor(TimeSpan.FromHours((double)maxJobHours).TotalSeconds / timePerRun.TotalSeconds);
+        runsPerJob = Math.Clamp(runsPerJob, 1, totalRuns);
+
+        var chunks = new List<int>();
+        var remainingRuns = totalRuns;
+        while (remainingRuns > 0)
+        {
+            var chunkRuns = Math.Min(runsPerJob, remainingRuns);
+            chunks.Add(chunkRuns);
+            remainingRuns -= chunkRuns;
+        }
+
+        return chunks;
+    }
+
     private static void ValidateRequest(ManufacturingRequest request)
     {
         if (request.Runs <= 0)
@@ -172,26 +202,37 @@ public sealed class ManufacturingCalculator(
                     var componentRuns = (int)Math.Ceiling(quantity / (decimal)componentBlueprint.ProductQuantity);
                     var componentFacility = GetFacilityForBlueprint(request, componentBlueprint, material);
                     var effectiveComponentFacility = FacilityFittingCalculator.ApplyBlueprintScope(componentFacility, componentBlueprint);
-                    var componentPlan = await ResolveMaterialsAsync(
-                        componentBlueprint,
-                        request,
-                        materialPriceProfile,
-                        componentFacility,
+                    var componentRunChunks = SplitRunsByJobDuration(
+                        componentBlueprint.ActivityType,
                         componentRuns,
-                        1,
-                        depth + 1,
-                        new HashSet<TypeId>(activeProductTypes),
-                        warnings,
-                        cancellationToken);
+                        CalculateProductionTime(componentBlueprint.BaseProductionTime, 1, request.TimeEfficiency, effectiveComponentFacility.TimeMultiplier),
+                        request);
+                    var componentPlans = new List<BuildPlan>();
 
-                    var componentOutputQuantity = componentRuns * componentBlueprint.ProductQuantity;
+                    foreach (var componentRunChunk in componentRunChunks)
+                    {
+                        componentPlans.Add(await ResolveMaterialsAsync(
+                            componentBlueprint,
+                            request,
+                            materialPriceProfile,
+                            componentFacility,
+                            componentRunChunk,
+                            1,
+                            depth + 1,
+                            new HashSet<TypeId>(activeProductTypes),
+                            warnings,
+                            cancellationToken));
+                    }
+
                     var componentProductPrice = await priceProvider.GetPriceAsync(componentBlueprint.ProductTypeId, materialPriceProfile, cancellationToken);
                     var componentProductUnitPrice = componentProductPrice?.Select(request.PriceProfile.MaterialPriceSelection) ?? buyRequirement.UnitPrice;
-                    var componentJobCost = CalculateJobCost(componentProductUnitPrice * componentOutputQuantity, effectiveComponentFacility);
-                    var componentProductionTime = CalculateProductionTime(componentBlueprint.BaseProductionTime, componentRuns, request.TimeEfficiency, effectiveComponentFacility.TimeMultiplier);
-                    var buildCost = componentPlan.MaterialCost + componentPlan.JobCost + componentJobCost;
+                    var componentJobCost = componentRunChunks.Sum(componentRunChunk =>
+                        CalculateJobCost(componentProductUnitPrice * componentBlueprint.ProductQuantity * componentRunChunk, effectiveComponentFacility));
+                    var componentProductionTime = TimeSpan.FromTicks(componentRunChunks.Sum(componentRunChunk =>
+                        CalculateProductionTime(componentBlueprint.BaseProductionTime, componentRunChunk, request.TimeEfficiency, effectiveComponentFacility.TimeMultiplier).Ticks));
+                    var buildCost = componentPlans.Sum(plan => plan.MaterialCost + plan.JobCost) + componentJobCost;
 
-                    decisions.AddRange(componentPlan.Decisions);
+                    decisions.AddRange(componentPlans.SelectMany(plan => plan.Decisions));
                     decisions.Add(new BuildBuyDecision
                     {
                         TypeId = material.TypeId,
@@ -207,11 +248,20 @@ public sealed class ManufacturingCalculator(
 
                     if (buildCost < buyCost)
                     {
-                        materials.AddRange(componentPlan.Materials);
-                        jobCost += componentPlan.JobCost + componentJobCost;
-                        productionTime += componentPlan.ProductionTime + componentProductionTime;
-                        jobs.Add(CreateProductionJob(componentBlueprint, componentFacility, effectiveComponentFacility, quantity, componentRuns, request.TimeEfficiency, depth + 1, blueprint.ProductName));
-                        jobs.AddRange(componentPlan.Jobs);
+                        materials.AddRange(componentPlans.SelectMany(plan => plan.Materials));
+                        jobCost += componentPlans.Sum(plan => plan.JobCost) + componentJobCost;
+                        productionTime += TimeSpan.FromTicks(componentPlans.Sum(plan => plan.ProductionTime.Ticks)) + componentProductionTime;
+                        jobs.AddRange(componentRunChunks.Select(componentRunChunk =>
+                            CreateProductionJob(
+                                componentBlueprint,
+                                componentFacility,
+                                effectiveComponentFacility,
+                                componentRunChunk * componentBlueprint.ProductQuantity,
+                                componentRunChunk,
+                                request.TimeEfficiency,
+                                depth + 1,
+                                blueprint.ProductName)));
+                        jobs.AddRange(componentPlans.SelectMany(plan => plan.Jobs));
                         continue;
                     }
                 }

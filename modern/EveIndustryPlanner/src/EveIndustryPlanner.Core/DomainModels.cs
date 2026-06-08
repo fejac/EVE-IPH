@@ -109,7 +109,10 @@ public sealed class MaterialRequirement
     public bool HasEnoughMarketVolume { get; init; } = true;
     public long MarketFilledQuantity { get; init; }
     public MaterialCalculationBreakdown Calculation { get; init; } = new();
-    public string CalculationText => Calculation.FormulaText;
+    public string CalculationOverrideText { get; init; } = string.Empty;
+    public string CalculationText => string.IsNullOrWhiteSpace(CalculationOverrideText)
+        ? Calculation.FormulaText
+        : CalculationOverrideText;
     public string MarketStatus => MissingPrice
         ? "Missing price"
         : HasEnoughMarketVolume
@@ -274,6 +277,8 @@ public sealed class ManufacturingRequest
     public FacilityProfile ComponentFacility { get; init; } = FacilityProfile.None;
     public FacilityProfile ReactionFacility { get; init; } = FacilityProfile.None;
     public PriceProfile PriceProfile { get; init; } = PriceProfile.Empty;
+    public decimal MaxManufacturingJobHours { get; init; }
+    public decimal MaxReactionJobHours { get; init; }
 }
 
 public sealed class BuildBuyDecision

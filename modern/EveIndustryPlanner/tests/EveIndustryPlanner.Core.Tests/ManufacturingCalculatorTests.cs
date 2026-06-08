@@ -258,6 +258,39 @@ public sealed class ManufacturingCalculatorTests
     }
 
     [Fact]
+    public async Task CalculateAsync_BuildBuySplitsComponentMaterialsByMaxJobHours()
+    {
+        var calculator = new ManufacturingCalculator(new ComponentSplitRepository(), new ComponentSplitPriceProvider());
+
+        var unsplit = await calculator.CalculateAsync(new ManufacturingRequest
+        {
+            BlueprintId = new BlueprintId(500),
+            Runs = 1,
+            MaterialEfficiency = 10,
+            TimeEfficiency = 0,
+            EnableBuildBuy = true,
+            BuildBuyDepth = BuildBuyDepth.BuildManufacturingComponents,
+            Facility = new FacilityProfile { SystemCostIndex = 0 }
+        }, CancellationToken.None);
+        var split = await calculator.CalculateAsync(new ManufacturingRequest
+        {
+            BlueprintId = new BlueprintId(500),
+            Runs = 1,
+            MaterialEfficiency = 10,
+            TimeEfficiency = 0,
+            EnableBuildBuy = true,
+            BuildBuyDepth = BuildBuyDepth.BuildManufacturingComponents,
+            Facility = new FacilityProfile { SystemCostIndex = 0 },
+            MaxManufacturingJobHours = 5
+        }, CancellationToken.None);
+
+        Assert.Equal(99, Assert.Single(unsplit.Materials, material => material.Name == "Raw Material").Quantity);
+        Assert.Equal(100, split.Materials.Where(material => material.Name == "Raw Material").Sum(material => material.Quantity));
+        Assert.Equal(2, split.ProductionJobs.Count(job => job.ProductName == "Component"));
+        Assert.All(split.ProductionJobs.Where(job => job.ProductName == "Component"), job => Assert.Equal(5, job.TotalRuns));
+    }
+
+    [Fact]
     public async Task CalculateAsync_BuildBuyUsesComponentFacilityForComponentMaterials()
     {
         var calculator = new ManufacturingCalculator(new BuildBuyRepository(BlueprintActivityType.Manufacturing), new BuildBuyPriceProvider());
@@ -456,6 +489,81 @@ public sealed class ManufacturingCalculatorTests
                 100 => 1000m,
                 200 => 100m,
                 300 => 10m,
+                _ => 0m
+            };
+
+            return Task.FromResult<MarketPrice?>(new MarketPrice
+            {
+                TypeId = typeId,
+                BuyPrice = price,
+                SellPrice = price,
+                BuyMaxPrice = price,
+                SellMinPrice = price
+            });
+        }
+    }
+
+    private sealed class ComponentSplitRepository : IBlueprintRepository
+    {
+        public Task<IReadOnlyList<BlueprintSearchResult>> SearchAsync(string query, CancellationToken cancellationToken)
+        {
+            return Task.FromResult<IReadOnlyList<BlueprintSearchResult>>([]);
+        }
+
+        public Task<BlueprintDefinition?> GetBlueprintAsync(BlueprintId blueprintId, CancellationToken cancellationToken)
+        {
+            return Task.FromResult<BlueprintDefinition?>(blueprintId == new BlueprintId(500) ? CreateProductBlueprint() : null);
+        }
+
+        public Task<BlueprintDefinition?> GetBlueprintByProductTypeAsync(TypeId productTypeId, CancellationToken cancellationToken)
+        {
+            return Task.FromResult<BlueprintDefinition?>(productTypeId == new TypeId(600) ? CreateComponentBlueprint() : null);
+        }
+
+        private static BlueprintDefinition CreateProductBlueprint()
+        {
+            return new BlueprintDefinition
+            {
+                BlueprintId = new BlueprintId(500),
+                ProductTypeId = new TypeId(501),
+                ProductName = "Product",
+                BlueprintName = "Product Blueprint",
+                ProductQuantity = 1,
+                BaseProductionTime = TimeSpan.FromMinutes(1),
+                Materials =
+                [
+                    new BlueprintMaterial { TypeId = new TypeId(600), Name = "Component", Quantity = 11, Volume = 1, Category = MaterialCategory.Component }
+                ]
+            };
+        }
+
+        private static BlueprintDefinition CreateComponentBlueprint()
+        {
+            return new BlueprintDefinition
+            {
+                BlueprintId = new BlueprintId(601),
+                ProductTypeId = new TypeId(600),
+                ProductName = "Component",
+                BlueprintName = "Component Blueprint",
+                ProductQuantity = 1,
+                BaseProductionTime = TimeSpan.FromHours(1),
+                Materials =
+                [
+                    new BlueprintMaterial { TypeId = new TypeId(700), Name = "Raw Material", Quantity = 11, Volume = 1, Category = MaterialCategory.Raw }
+                ]
+            };
+        }
+    }
+
+    private sealed class ComponentSplitPriceProvider : IMarketPriceProvider
+    {
+        public Task<MarketPrice?> GetPriceAsync(TypeId typeId, PriceProfile profile, CancellationToken cancellationToken)
+        {
+            var price = typeId.Value switch
+            {
+                501 => 1_000m,
+                600 => 10_000m,
+                700 => 1m,
                 _ => 0m
             };
 
