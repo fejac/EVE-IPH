@@ -172,7 +172,8 @@ public sealed class SdeIndustryDataProvider(string sdeDirectory) : IBlueprintRep
             new BlueprintId(blueprint.BlueprintTypeId),
             GetTypeOrUnknown(sde, blueprint.BlueprintTypeId).Name,
             GetTypeOrUnknown(sde, productTypeId).Name,
-            GetTypeOrUnknown(sde, productTypeId).TechLevel);
+            GetTypeOrUnknown(sde, productTypeId).TechLevel,
+            blueprint.ActivityType);
     }
 
     private static SdeTypeInfo GetTypeOrUnknown(SdeData sde, long typeId)

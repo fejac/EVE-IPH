@@ -46,6 +46,8 @@ The MVP intentionally uses simple deterministic rules:
 - material and product price strategies are configurable, including instant order and order-posting strategies;
 - SDE `basePrice` is only a fallback when Fuzzworks has no usable data;
 - final product, component, and reaction jobs can use separate facility profiles;
+- final manufacturing uses the selected blueprint ME/TE, recursively built manufacturing components default to ME 10 / TE 20 and can be overridden per blueprint in the production tree;
+- reaction formulas always use ME 0 / TE 0 and the selected reaction facility;
 - missing prices become warnings, not exceptions.
 
 These assumptions must be compared against `Blueprint.vb`, `ManufacturingFacility.vb`, and `Materials.vb` before expanding to exact EVE IPH behavior.

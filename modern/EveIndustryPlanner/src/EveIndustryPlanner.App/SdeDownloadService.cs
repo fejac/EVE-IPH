@@ -24,12 +24,15 @@ public static class SdeDownloadService
         }
     }
 
-    public static async Task EnsureAvailableAsync(IProgress<string>? progress = null, CancellationToken cancellationToken = default)
+    public static async Task<bool> EnsureAvailableAsync(
+        IProgress<string>? progress = null,
+        CancellationToken cancellationToken = default,
+        bool forceRefresh = false)
     {
-        if (SdeIndustryDataProvider.IsAvailable(DefaultSdeDirectory))
+        if (!forceRefresh && SdeIndustryDataProvider.IsAvailable(DefaultSdeDirectory))
         {
             progress?.Report("Using cached SDE data");
-            return;
+            return true;
         }
 
         var appData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "EveIndustryPlanner");
@@ -55,7 +58,7 @@ public static class SdeDownloadService
             if (!ContainsRequiredFiles(tempDirectory))
             {
                 progress?.Report("Downloaded SDE is missing required files");
-                return;
+                return false;
             }
 
             Directory.CreateDirectory(DefaultSdeDirectory);
@@ -66,10 +69,12 @@ public static class SdeDownloadService
             }
 
             progress?.Report("Latest EVE SDE ready");
+            return true;
         }
         catch (Exception ex) when (ex is HttpRequestException or IOException or InvalidDataException or UnauthorizedAccessException or TaskCanceledException)
         {
             progress?.Report($"Could not download SDE; sample data will be used: {ex.Message}");
+            return false;
         }
         finally
         {

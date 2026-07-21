@@ -42,7 +42,8 @@ public sealed record BlueprintSearchResult(
     BlueprintId BlueprintId,
     string BlueprintName,
     string ProductName,
-    int TechLevel);
+    int TechLevel,
+    BlueprintActivityType ActivityType = BlueprintActivityType.Manufacturing);
 
 public sealed record BlueprintCatalogItem(
     BlueprintId BlueprintId,
@@ -268,6 +269,10 @@ public sealed class ManufacturingRequest
     public int Lines { get; init; } = 1;
     public int MaterialEfficiency { get; init; }
     public int TimeEfficiency { get; init; }
+    public int DefaultComponentMaterialEfficiency { get; init; } = 10;
+    public int DefaultComponentTimeEfficiency { get; init; } = 20;
+    public IReadOnlyDictionary<BlueprintId, BlueprintEfficiencySettings> BlueprintEfficiencyOverrides { get; init; }
+        = new Dictionary<BlueprintId, BlueprintEfficiencySettings>();
     public decimal AdditionalCosts { get; init; }
     public bool EnableBuildBuy { get; init; }
     public BuildBuyDepth BuildBuyDepth { get; init; } = BuildBuyDepth.DirectMaterialsOnly;
@@ -280,6 +285,8 @@ public sealed class ManufacturingRequest
     public decimal MaxManufacturingJobHours { get; init; }
     public decimal MaxReactionJobHours { get; init; }
 }
+
+public sealed record BlueprintEfficiencySettings(int MaterialEfficiency, int TimeEfficiency);
 
 public sealed class BuildBuyDecision
 {
@@ -303,11 +310,14 @@ public sealed class ProductionJobRequirement
     public BlueprintActivityType ActivityType { get; init; }
     public string FacilityName { get; init; } = string.Empty;
     public string ParentProductName { get; init; } = string.Empty;
+    public BlueprintId? ParentBlueprintId { get; init; }
     public long RequiredQuantity { get; init; }
     public int OutputQuantityPerRun { get; init; }
     public int TotalRuns { get; init; }
     public TimeSpan TimePerRun { get; init; }
     public TimeSpan TotalTime { get; init; }
+    public int MaterialEfficiency { get; init; }
+    public int TimeEfficiency { get; init; }
     public int Depth { get; init; }
 }
 

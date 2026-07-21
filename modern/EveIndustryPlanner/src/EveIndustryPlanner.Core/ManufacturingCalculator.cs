@@ -25,13 +25,24 @@ public sealed class ManufacturingCalculator(
         var outputQuantity = blueprint.ProductQuantity * totalRuns;
         var productUnitPrice = productPrice?.Select(request.PriceProfile.ProductPriceSelection) ?? 0m;
         var estimatedItemValue = productUnitPrice * outputQuantity;
-        var finalFacility = FacilityFittingCalculator.ApplyBlueprintScope(GetFinalFacility(request), blueprint);
+        var rootFacility = GetRootFacility(request, blueprint);
+        var finalFacility = FacilityFittingCalculator.ApplyBlueprintScope(rootFacility, blueprint);
+        var finalEfficiency = GetBlueprintEfficiency(request, blueprint, depth: 0);
         var jobCost = CalculateJobCost(productUnitPrice * blueprint.ProductQuantity * request.Runs, finalFacility) * request.Lines;
-        var productionTime = TimeSpan.FromTicks(CalculateProductionTime(blueprint.BaseProductionTime, request.Runs, request.TimeEfficiency, finalFacility.TimeMultiplier).Ticks * request.Lines);
+        var productionTime = TimeSpan.FromTicks(CalculateProductionTime(blueprint.BaseProductionTime, request.Runs, finalEfficiency.TimeEfficiency, finalFacility.TimeMultiplier).Ticks * request.Lines);
         var productionJobs = Enumerable.Range(0, request.Lines)
-            .Select(_ => CreateProductionJob(blueprint, GetFinalFacility(request), finalFacility, blueprint.ProductQuantity * request.Runs, request.Runs, request.TimeEfficiency, 0, string.Empty))
+            .Select(_ => CreateProductionJob(
+                blueprint,
+                rootFacility,
+                finalFacility,
+                blueprint.ProductQuantity * request.Runs,
+                request.Runs,
+                finalEfficiency,
+                0,
+                string.Empty,
+                null))
             .ToList();
-        var buildPlan = await ResolveMaterialsAsync(blueprint, request, materialPriceProfile, GetFinalFacility(request), request.Runs, request.Lines, 0, [], warnings, cancellationToken);
+        var buildPlan = await ResolveMaterialsAsync(blueprint, request, materialPriceProfile, rootFacility, request.Runs, request.Lines, 0, [], warnings, cancellationToken);
         productionJobs.AddRange(buildPlan.Jobs);
         var materialCost = buildPlan.MaterialCost;
         var totalJobCost = jobCost + buildPlan.JobCost;
@@ -153,6 +164,16 @@ public sealed class ManufacturingCalculator(
             throw new ArgumentOutOfRangeException(nameof(request), "Time efficiency must be between 0 and 20 for the MVP.");
         }
 
+        ValidateEfficiency(
+            request.DefaultComponentMaterialEfficiency,
+            request.DefaultComponentTimeEfficiency,
+            "Default component efficiency");
+
+        foreach (var (blueprintId, efficiency) in request.BlueprintEfficiencyOverrides)
+        {
+            ValidateEfficiency(efficiency.MaterialEfficiency, efficiency.TimeEfficiency, $"Blueprint {blueprintId.Value} efficiency");
+        }
+
         if (request.AdditionalCosts < 0)
         {
             throw new ArgumentOutOfRangeException(nameof(request), "Additional costs cannot be negative.");
@@ -182,12 +203,13 @@ public sealed class ManufacturingCalculator(
         var productionTime = TimeSpan.Zero;
         var jobs = new List<ProductionJobRequirement>();
         var effectiveFacility = FacilityFittingCalculator.ApplyBlueprintScope(facility, blueprint);
+        var blueprintEfficiency = GetBlueprintEfficiency(request, blueprint, depth);
 
         activeProductTypes.Add(blueprint.ProductTypeId);
 
         foreach (var material in blueprint.Materials)
         {
-            var calculation = CalculateMaterialBreakdown(material.Quantity, runs, lines, request.MaterialEfficiency, effectiveFacility.MaterialMultiplier);
+            var calculation = CalculateMaterialBreakdown(material.Quantity, runs, lines, blueprintEfficiency.MaterialEfficiency, effectiveFacility.MaterialMultiplier);
             var quantity = calculation.TotalQuantity;
             var buyRequirement = await CreateBuyRequirementAsync(material, quantity, calculation, request.PriceProfile.MaterialPriceSelection, materialPriceProfile, warnings, cancellationToken);
             var buyCost = buyRequirement.TotalPrice;
@@ -202,10 +224,11 @@ public sealed class ManufacturingCalculator(
                     var componentRuns = (int)Math.Ceiling(quantity / (decimal)componentBlueprint.ProductQuantity);
                     var componentFacility = GetFacilityForBlueprint(request, componentBlueprint, material);
                     var effectiveComponentFacility = FacilityFittingCalculator.ApplyBlueprintScope(componentFacility, componentBlueprint);
+                    var componentEfficiency = GetBlueprintEfficiency(request, componentBlueprint, depth + 1);
                     var componentRunChunks = SplitRunsByJobDuration(
                         componentBlueprint.ActivityType,
                         componentRuns,
-                        CalculateProductionTime(componentBlueprint.BaseProductionTime, 1, request.TimeEfficiency, effectiveComponentFacility.TimeMultiplier),
+                        CalculateProductionTime(componentBlueprint.BaseProductionTime, 1, componentEfficiency.TimeEfficiency, effectiveComponentFacility.TimeMultiplier),
                         request);
                     var componentPlans = new List<BuildPlan>();
 
@@ -229,7 +252,7 @@ public sealed class ManufacturingCalculator(
                     var componentJobCost = componentRunChunks.Sum(componentRunChunk =>
                         CalculateJobCost(componentProductUnitPrice * componentBlueprint.ProductQuantity * componentRunChunk, effectiveComponentFacility));
                     var componentProductionTime = TimeSpan.FromTicks(componentRunChunks.Sum(componentRunChunk =>
-                        CalculateProductionTime(componentBlueprint.BaseProductionTime, componentRunChunk, request.TimeEfficiency, effectiveComponentFacility.TimeMultiplier).Ticks));
+                        CalculateProductionTime(componentBlueprint.BaseProductionTime, componentRunChunk, componentEfficiency.TimeEfficiency, effectiveComponentFacility.TimeMultiplier).Ticks));
                     var buildCost = componentPlans.Sum(plan => plan.MaterialCost + plan.JobCost) + componentJobCost;
 
                     decisions.AddRange(componentPlans.SelectMany(plan => plan.Decisions));
@@ -258,9 +281,10 @@ public sealed class ManufacturingCalculator(
                                 effectiveComponentFacility,
                                 componentRunChunk * componentBlueprint.ProductQuantity,
                                 componentRunChunk,
-                                request.TimeEfficiency,
+                                componentEfficiency,
                                 depth + 1,
-                                blueprint.ProductName)));
+                                blueprint.ProductName,
+                                blueprint.BlueprintId)));
                         jobs.AddRange(componentPlans.SelectMany(plan => plan.Jobs));
                         continue;
                     }
@@ -373,15 +397,58 @@ public sealed class ManufacturingCalculator(
         return Math.Round(estimatedItemValue * effectiveRate, 2, MidpointRounding.AwayFromZero);
     }
 
+    private static FacilityProfile GetRootFacility(ManufacturingRequest request, BlueprintDefinition blueprint)
+    {
+        return blueprint.ActivityType == BlueprintActivityType.Reaction
+            ? request.ReactionFacility
+            : GetFinalFacility(request);
+    }
+
+    private static BlueprintEfficiencySettings GetBlueprintEfficiency(
+        ManufacturingRequest request,
+        BlueprintDefinition blueprint,
+        int depth)
+    {
+        if (blueprint.ActivityType == BlueprintActivityType.Reaction)
+        {
+            return new BlueprintEfficiencySettings(0, 0);
+        }
+
+        if (depth == 0)
+        {
+            return new BlueprintEfficiencySettings(request.MaterialEfficiency, request.TimeEfficiency);
+        }
+
+        return request.BlueprintEfficiencyOverrides.TryGetValue(blueprint.BlueprintId, out var efficiency)
+            ? efficiency
+            : new BlueprintEfficiencySettings(
+                request.DefaultComponentMaterialEfficiency,
+                request.DefaultComponentTimeEfficiency);
+    }
+
+    private static void ValidateEfficiency(int materialEfficiency, int timeEfficiency, string name)
+    {
+        if (materialEfficiency is < 0 or > 10)
+        {
+            throw new ArgumentOutOfRangeException(nameof(materialEfficiency), $"{name} ME must be between 0 and 10.");
+        }
+
+        if (timeEfficiency is < 0 or > 20)
+        {
+            throw new ArgumentOutOfRangeException(nameof(timeEfficiency), $"{name} TE must be between 0 and 20.");
+        }
+    }
+
     private static ProductionJobRequirement CreateProductionJob(
         BlueprintDefinition blueprint,
         FacilityProfile facility,
         FacilityProfile effectiveFacility,
         long requiredQuantity,
         int runs,
-        int timeEfficiency,
+        BlueprintEfficiencySettings efficiency,
         int depth,
-        string parentProductName)
+        string parentProductName,
+        BlueprintId? parentBlueprintId)
     {
         return new ProductionJobRequirement
         {
@@ -392,11 +459,14 @@ public sealed class ManufacturingCalculator(
             ActivityType = blueprint.ActivityType,
             FacilityName = facility.Name,
             ParentProductName = parentProductName,
+            ParentBlueprintId = parentBlueprintId,
             RequiredQuantity = requiredQuantity,
             OutputQuantityPerRun = blueprint.ProductQuantity,
             TotalRuns = runs,
-            TimePerRun = CalculateProductionTime(blueprint.BaseProductionTime, 1, timeEfficiency, effectiveFacility.TimeMultiplier),
-            TotalTime = CalculateProductionTime(blueprint.BaseProductionTime, runs, timeEfficiency, effectiveFacility.TimeMultiplier),
+            TimePerRun = CalculateProductionTime(blueprint.BaseProductionTime, 1, efficiency.TimeEfficiency, effectiveFacility.TimeMultiplier),
+            TotalTime = CalculateProductionTime(blueprint.BaseProductionTime, runs, efficiency.TimeEfficiency, effectiveFacility.TimeMultiplier),
+            MaterialEfficiency = efficiency.MaterialEfficiency,
+            TimeEfficiency = efficiency.TimeEfficiency,
             Depth = depth
         };
     }

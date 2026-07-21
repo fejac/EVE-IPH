@@ -55,6 +55,87 @@ public sealed class ManufacturingCalculatorTests
     }
 
     [Fact]
+    public async Task CalculateAsync_ReactionAlwaysUsesZeroMeAndTe()
+    {
+        var calculator = new ManufacturingCalculator(new ReactionRepository(), new BuildBuyPriceProvider());
+
+        var result = await calculator.CalculateAsync(new ManufacturingRequest
+        {
+            BlueprintId = new BlueprintId(900),
+            Runs = 1,
+            MaterialEfficiency = 10,
+            TimeEfficiency = 20,
+            FinalProductFacility = FacilityProfile.None
+        }, CancellationToken.None);
+
+        var material = Assert.Single(result.Materials);
+        var job = Assert.Single(result.ProductionJobs);
+        Assert.Equal(100, material.Quantity);
+        Assert.Equal(0, material.Calculation.MaterialEfficiency);
+        Assert.Equal(0, job.MaterialEfficiency);
+        Assert.Equal(0, job.TimeEfficiency);
+        Assert.Equal(TimeSpan.FromHours(1), job.TotalTime);
+    }
+
+    [Fact]
+    public async Task CalculateAsync_ComponentUsesDefaultsAndBlueprintOverride()
+    {
+        var calculator = new ManufacturingCalculator(
+            new BuildBuyRepository(BlueprintActivityType.Manufacturing, rawMaterialQuantity: 100),
+            new BuildBuyPriceProvider());
+
+        var defaults = await calculator.CalculateAsync(new ManufacturingRequest
+        {
+            BlueprintId = new BlueprintId(1),
+            Runs = 1,
+            MaterialEfficiency = 0,
+            TimeEfficiency = 0,
+            EnableBuildBuy = true,
+            BuildBuyDepth = BuildBuyDepth.BuildManufacturingComponents,
+            ComponentFacility = new FacilityProfile { SystemCostIndex = 0 }
+        }, CancellationToken.None);
+        var overridden = await calculator.CalculateAsync(new ManufacturingRequest
+        {
+            BlueprintId = new BlueprintId(1),
+            Runs = 1,
+            MaterialEfficiency = 0,
+            TimeEfficiency = 0,
+            EnableBuildBuy = true,
+            BuildBuyDepth = BuildBuyDepth.BuildManufacturingComponents,
+            ComponentFacility = new FacilityProfile { SystemCostIndex = 0 },
+            BlueprintEfficiencyOverrides = new Dictionary<BlueprintId, BlueprintEfficiencySettings>
+            {
+                [new BlueprintId(2)] = new(0, 0)
+            }
+        }, CancellationToken.None);
+
+        Assert.Equal(90, Assert.Single(defaults.Materials, material => material.Name == "Raw Material").Quantity);
+        Assert.Equal(100, Assert.Single(overridden.Materials, material => material.Name == "Raw Material").Quantity);
+        Assert.Contains(defaults.ProductionJobs, job => job.BlueprintId == new BlueprintId(2) && job.MaterialEfficiency == 10 && job.TimeEfficiency == 20);
+        Assert.Contains(overridden.ProductionJobs, job => job.BlueprintId == new BlueprintId(2) && job.MaterialEfficiency == 0 && job.TimeEfficiency == 0);
+    }
+
+    [Fact]
+    public async Task CalculateAsync_RootReactionUsesReactionFacility()
+    {
+        var calculator = new ManufacturingCalculator(new ReactionRepository(), new BuildBuyPriceProvider());
+
+        var result = await calculator.CalculateAsync(new ManufacturingRequest
+        {
+            BlueprintId = new BlueprintId(900),
+            Runs = 1,
+            MaterialEfficiency = 10,
+            TimeEfficiency = 20,
+            FinalProductFacility = new FacilityProfile { Name = "Manufacturing", MaterialMultiplier = 1m, TimeMultiplier = 1m },
+            ReactionFacility = new FacilityProfile { Name = "Reactor", MaterialMultiplier = 0.5m, TimeMultiplier = 0.5m }
+        }, CancellationToken.None);
+
+        Assert.Equal(50, Assert.Single(result.Materials).Quantity);
+        Assert.Equal(TimeSpan.FromMinutes(30), result.FinalProductionTime);
+        Assert.Equal("Reactor", Assert.Single(result.ProductionJobs).FacilityName);
+    }
+
+    [Fact]
     public async Task CalculateAsync_LinesRoundMaterialsPerJob()
     {
         var calculator = new ManufacturingCalculator(new LineRoundingRepository(), new LineRoundingPriceProvider());
@@ -287,7 +368,9 @@ public sealed class ManufacturingCalculatorTests
         Assert.Equal(99, Assert.Single(unsplit.Materials, material => material.Name == "Raw Material").Quantity);
         Assert.Equal(100, split.Materials.Where(material => material.Name == "Raw Material").Sum(material => material.Quantity));
         Assert.Equal(2, split.ProductionJobs.Count(job => job.ProductName == "Component"));
-        Assert.All(split.ProductionJobs.Where(job => job.ProductName == "Component"), job => Assert.Equal(5, job.TotalRuns));
+        Assert.Equal(
+            [4, 6],
+            split.ProductionJobs.Where(job => job.ProductName == "Component").Select(job => job.TotalRuns).Order().ToArray());
     }
 
     [Fact]
@@ -430,7 +513,10 @@ public sealed class ManufacturingCalculatorTests
         }
     }
 
-    private sealed class BuildBuyRepository(BlueprintActivityType componentActivityType, int materialCategoryId = 0) : IBlueprintRepository
+    private sealed class BuildBuyRepository(
+        BlueprintActivityType componentActivityType,
+        int materialCategoryId = 0,
+        long rawMaterialQuantity = 1) : IBlueprintRepository
     {
         private readonly BlueprintDefinition root = new()
         {
@@ -474,7 +560,7 @@ public sealed class ManufacturingCalculatorTests
                 ActivityType = componentActivityType,
                 Materials =
                 [
-                    new BlueprintMaterial { TypeId = new TypeId(300), Name = "Raw Material", Quantity = 1, Volume = 1, Category = MaterialCategory.Raw }
+                    new BlueprintMaterial { TypeId = new TypeId(300), Name = "Raw Material", Quantity = rawMaterialQuantity, Volume = 1, Category = MaterialCategory.Raw }
                 ]
             };
         }
@@ -487,7 +573,7 @@ public sealed class ManufacturingCalculatorTests
             var price = typeId.Value switch
             {
                 100 => 1000m,
-                200 => 100m,
+                200 => 10_000m,
                 300 => 10m,
                 _ => 0m
             };
@@ -500,6 +586,46 @@ public sealed class ManufacturingCalculatorTests
                 BuyMaxPrice = price,
                 SellMinPrice = price
             });
+        }
+    }
+
+    private sealed class ReactionRepository : IBlueprintRepository
+    {
+        public Task<IReadOnlyList<BlueprintSearchResult>> SearchAsync(string query, CancellationToken cancellationToken)
+        {
+            return Task.FromResult<IReadOnlyList<BlueprintSearchResult>>([]);
+        }
+
+        public Task<BlueprintDefinition?> GetBlueprintAsync(BlueprintId blueprintId, CancellationToken cancellationToken)
+        {
+            return Task.FromResult<BlueprintDefinition?>(blueprintId == new BlueprintId(900)
+                ? new BlueprintDefinition
+                {
+                    BlueprintId = blueprintId,
+                    ProductTypeId = new TypeId(901),
+                    ProductName = "Reaction Product",
+                    BlueprintName = "Reaction Formula",
+                    ProductQuantity = 200,
+                    BaseProductionTime = TimeSpan.FromHours(1),
+                    ActivityType = BlueprintActivityType.Reaction,
+                    Materials =
+                    [
+                        new BlueprintMaterial
+                        {
+                            TypeId = new TypeId(300),
+                            Name = "Raw Material",
+                            Quantity = 100,
+                            Volume = 1,
+                            Category = MaterialCategory.Raw
+                        }
+                    ]
+                }
+                : null);
+        }
+
+        public Task<BlueprintDefinition?> GetBlueprintByProductTypeAsync(TypeId productTypeId, CancellationToken cancellationToken)
+        {
+            return Task.FromResult<BlueprintDefinition?>(null);
         }
     }
 

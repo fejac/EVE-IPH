@@ -127,11 +127,13 @@
                                         </StackPanel>
                                         <StackPanel Grid.Column="2" Margin="0,0,8,0">
                                             <TextBlock Text="ME" FontSize="12" Foreground="#526176" />
-                                            <TextBox Text="{Binding MaterialEfficiency, UpdateSourceTrigger=PropertyChanged}" />
+                                            <TextBox Text="{Binding MaterialEfficiency, UpdateSourceTrigger=PropertyChanged}"
+                                                     IsEnabled="{Binding IsFinalEfficiencyEditable}" />
                                         </StackPanel>
                                         <StackPanel Grid.Column="3">
                                             <TextBlock Text="TE" FontSize="12" Foreground="#526176" />
-                                            <TextBox Text="{Binding TimeEfficiency, UpdateSourceTrigger=PropertyChanged}" />
+                                            <TextBox Text="{Binding TimeEfficiency, UpdateSourceTrigger=PropertyChanged}"
+                                                     IsEnabled="{Binding IsFinalEfficiencyEditable}" />
                                         </StackPanel>
                                     </Grid>
 
@@ -360,19 +362,67 @@
                             </Border>
 
                             <Border Grid.Column="2" Style="{StaticResource PanelBorder}">
-                                <Grid>
-                                    <Grid.RowDefinitions>
-                                        <RowDefinition Height="Auto" />
-                                        <RowDefinition Height="*" />
-                                    </Grid.RowDefinitions>
-                                    <TextBlock Text="Breakdown" FontSize="16" FontWeight="SemiBold" Margin="0,0,0,8" />
-                                    <TextBox Grid.Row="1"
-                                             Text="{Binding CalculationBreakdownText, Mode=OneWay}"
-                                             AcceptsReturn="True"
-                                             IsReadOnly="True"
-                                             FontFamily="Consolas"
-                                             VerticalScrollBarVisibility="Auto" />
-                                </Grid>
+                                <TabControl Background="Transparent" BorderThickness="0">
+                                    <TabItem Header="Production Tree">
+                                        <Grid Margin="0,8,0,0">
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="Auto" />
+                                                <RowDefinition Height="*" />
+                                            </Grid.RowDefinitions>
+                                            <Grid Margin="22,0,4,4">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="65" />
+                                                    <ColumnDefinition Width="38" />
+                                                    <ColumnDefinition Width="38" />
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Text="Job" FontSize="11" Foreground="#526176" />
+                                                <TextBlock Grid.Column="1" Text="Runs" FontSize="11" Foreground="#526176" />
+                                                <TextBlock Grid.Column="2" Text="ME" FontSize="11" Foreground="#526176" />
+                                                <TextBlock Grid.Column="3" Text="TE" FontSize="11" Foreground="#526176" />
+                                            </Grid>
+                                            <TreeView Grid.Row="1" ItemsSource="{Binding ProductionTree}" BorderThickness="0">
+                                                <TreeView.ItemTemplate>
+                                                    <HierarchicalDataTemplate ItemsSource="{Binding Children}">
+                                                        <Grid ToolTip="{Binding EfficiencyHint}" Margin="0,2">
+                                                            <Grid.ColumnDefinitions>
+                                                                <ColumnDefinition Width="210" />
+                                                                <ColumnDefinition Width="65" />
+                                                                <ColumnDefinition Width="38" />
+                                                                <ColumnDefinition Width="38" />
+                                                            </Grid.ColumnDefinitions>
+                                                            <StackPanel>
+                                                                <TextBlock Text="{Binding ProductName}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                                                <TextBlock FontSize="10" Foreground="#526176">
+                                                                    <Run Text="{Binding ActivityName, Mode=OneWay}" />
+                                                                    <Run Text=" @ " />
+                                                                    <Run Text="{Binding FacilityName, Mode=OneWay}" />
+                                                                </TextBlock>
+                                                            </StackPanel>
+                                                            <TextBlock Grid.Column="1" Text="{Binding TotalRuns, StringFormat=N0}" VerticalAlignment="Center" />
+                                                            <TextBox Grid.Column="2"
+                                                                     Text="{Binding MaterialEfficiency, UpdateSourceTrigger=PropertyChanged}"
+                                                                     IsEnabled="{Binding CanEditEfficiency}"
+                                                                     MinHeight="24" Padding="2" Margin="1" />
+                                                            <TextBox Grid.Column="3"
+                                                                     Text="{Binding TimeEfficiency, UpdateSourceTrigger=PropertyChanged}"
+                                                                     IsEnabled="{Binding CanEditEfficiency}"
+                                                                     MinHeight="24" Padding="2" Margin="1" />
+                                                        </Grid>
+                                                    </HierarchicalDataTemplate>
+                                                </TreeView.ItemTemplate>
+                                            </TreeView>
+                                        </Grid>
+                                    </TabItem>
+                                    <TabItem Header="Breakdown">
+                                        <TextBox Margin="0,8,0,0"
+                                                 Text="{Binding CalculationBreakdownText, Mode=OneWay}"
+                                                 AcceptsReturn="True"
+                                                 IsReadOnly="True"
+                                                 FontFamily="Consolas"
+                                                 VerticalScrollBarVisibility="Auto" />
+                                    </TabItem>
+                                </TabControl>
                             </Border>
                         </Grid>
                     </Grid>
@@ -969,9 +1019,19 @@
             </TabItem>
         </TabControl>
 
-        <TextBlock Grid.Row="2"
-                   Text="Uses local SDE data, Fuzzworks prices, and server-synced planner data."
-                   Foreground="#526176"
-                   Margin="0,10,0,0" />
+        <DockPanel Grid.Row="2" Margin="0,10,0,0">
+            <Button Content="Refresh SDE"
+                    Command="{Binding RefreshSdeCommand}"
+                    MinHeight="26"
+                    Padding="8,2"
+                    DockPanel.Dock="Right" />
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                <TextBlock Text="{Binding SdeFreshnessText}" Foreground="#526176" />
+                <TextBlock Text="  |  " Foreground="#9aa4b2" />
+                <TextBlock Text="{Binding MarketFreshnessText}" Foreground="#526176" />
+                <TextBlock Text="  |  " Foreground="#9aa4b2" />
+                <TextBlock Text="{Binding CostIndexFreshnessText}" Foreground="#526176" />
+            </StackPanel>
+        </DockPanel>
     </Grid>
 </Window>

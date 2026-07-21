@@ -22,6 +22,18 @@ public sealed class SdeIndustryDataProviderTests : IDisposable
                   time: 60
               blueprintTypeID: 100
               maxProductionLimit: 300
+            101:
+              activities:
+                reaction:
+                  materials:
+                  - quantity: 100
+                    typeID: 34
+                  products:
+                  - quantity: 200
+                    typeID: 201
+                  time: 3600
+              blueprintTypeID: 101
+              maxProductionLimit: 1000
             """);
         File.WriteAllText(Path.Combine(tempDirectory, "types.yaml"), """
             34:
@@ -47,6 +59,20 @@ public sealed class SdeIndustryDataProviderTests : IDisposable
               portionSize: 1
               published: true
               volume: 5.0
+            101:
+              basePrice: 1000.0
+              name:
+                en: Test Reaction Formula
+              portionSize: 1
+              published: true
+              volume: 0.01
+            201:
+              basePrice: 100.0
+              name:
+                en: Test Reaction Product
+              portionSize: 1
+              published: true
+              volume: 0.1
             """);
         File.WriteAllText(Path.Combine(tempDirectory, "groups.yaml"), """
             25:
@@ -86,12 +112,34 @@ public sealed class SdeIndustryDataProviderTests : IDisposable
         var provider = new SdeIndustryDataProvider(tempDirectory);
 
         var catalog = await provider.GetManufacturableBlueprintsAsync(CancellationToken.None);
-        var item = catalog.Single();
+        var item = Assert.Single(catalog, item => item.BlueprintId == new BlueprintId(100));
 
         Assert.Equal(2, item.TechLevel);
         Assert.Equal(2, item.MetaGroupId);
         Assert.Equal("Tech II", item.MetaGroupName);
         Assert.Equal(6, item.ProductCategoryId);
+    }
+
+    [Fact]
+    public async Task ReactionFromSde_IgnoresManufacturingMeAndTe()
+    {
+        var provider = new SdeIndustryDataProvider(tempDirectory);
+        var calculator = new ManufacturingCalculator(provider, provider);
+        var searchResult = Assert.Single(await provider.SearchAsync("reaction product", CancellationToken.None));
+
+        var result = await calculator.CalculateAsync(new ManufacturingRequest
+        {
+            BlueprintId = searchResult.BlueprintId,
+            Runs = 1,
+            MaterialEfficiency = 10,
+            TimeEfficiency = 20,
+            FinalProductFacility = FacilityProfile.None
+        }, CancellationToken.None);
+
+        Assert.Equal(BlueprintActivityType.Reaction, searchResult.ActivityType);
+        Assert.Equal(100, Assert.Single(result.Materials).Quantity);
+        Assert.Equal(0, Assert.Single(result.ProductionJobs).MaterialEfficiency);
+        Assert.Equal(TimeSpan.FromHours(1), result.FinalProductionTime);
     }
 
     [Fact]

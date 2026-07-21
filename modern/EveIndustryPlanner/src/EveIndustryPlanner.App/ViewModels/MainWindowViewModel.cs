@@ -18,10 +18,12 @@ public sealed class MainWindowViewModel : ObservableObject
     private readonly IManufacturingCalculator calculator;
     private readonly IShoppingListService shoppingListService;
     private readonly UserSettingsService userSettingsService;
+    private readonly DataFreshnessService dataFreshnessService;
     private readonly EveSsoCharacterAuthService characterAuthService = new();
     private readonly EveAssetService assetService;
     private readonly PocketBaseDataService dataService;
     private readonly List<FacilityRigOption> allFacilityRigs = [];
+    private readonly Dictionary<BlueprintId, BlueprintEfficiencySettings> blueprintEfficiencyOverrides = [];
 
     private string searchText = string.Empty;
     private BlueprintSearchResult? selectedBlueprint;
@@ -97,6 +99,10 @@ public sealed class MainWindowViewModel : ObservableObject
     private string marketScannerStatusText = "Scanner ready.";
     private string marketScannerProgressText = string.Empty;
     private readonly Dictionary<string, MarketScannerCacheEntry> marketScannerCache = new(StringComparer.Ordinal);
+    private CancellationTokenSource? efficiencyRecalculation;
+    private string sdeFreshnessText = "SDE: checking";
+    private string marketFreshnessText = "Market: checking";
+    private string costIndexFreshnessText = "Cost index: checking";
 
     private static readonly IReadOnlyList<string> DefaultCharacterScopes =
     [
@@ -165,6 +171,10 @@ public sealed class MainWindowViewModel : ObservableObject
         this.calculator = calculator;
         this.shoppingListService = shoppingListService;
         this.userSettingsService = userSettingsService ?? new UserSettingsService(GetSettingsFilePath());
+        dataFreshnessService = new DataFreshnessService(
+            FindSdeDirectory() ?? SdeDownloadService.DefaultSdeDirectory,
+            GetMarketCacheFilePath(),
+            GetIndustryCostIndexCacheFilePath());
         assetService = new EveAssetService(() => PocketBaseUrl);
         dataService = new PocketBaseDataService(() => PocketBaseUrl, () => SelectedCharacterAccount?.PocketBaseAuthToken ?? CharacterAccounts.FirstOrDefault()?.PocketBaseAuthToken ?? string.Empty);
 
@@ -215,6 +225,8 @@ public sealed class MainWindowViewModel : ObservableObject
         AddCharacterCommand = new AsyncRelayCommand(AddCharacterAsync, () => !IsBusy);
         DeleteCharacterCommand = new RelayCommand(DeleteSelectedCharacter, () => SelectedCharacterAccount is not null);
         RunMarketScannerCommand = new AsyncRelayCommand(RunMarketScannerAsync, () => !IsBusy && !IsMarketScannerBusy && blueprintCatalogProvider is not null);
+        RefreshSdeCommand = new AsyncRelayCommand(RefreshSdeAsync, () => !IsBusy);
+        RefreshDataFreshness();
     }
 
     public async Task InitializeAsync(IProgress<string>? progress = null)
@@ -232,6 +244,8 @@ public sealed class MainWindowViewModel : ObservableObject
     public ObservableCollection<BlueprintSearchResult> Blueprints { get; } = [];
 
     public ObservableCollection<MaterialRequirement> Materials { get; } = [];
+
+    public ObservableCollection<ProductionTreeNodeViewModel> ProductionTree { get; } = [];
 
     public ObservableCollection<ProductionLedgerEntry> ProductionLedgerEntries { get; } = [];
 
@@ -392,6 +406,26 @@ public sealed class MainWindowViewModel : ObservableObject
 
     public ICommand RunMarketScannerCommand { get; }
 
+    public ICommand RefreshSdeCommand { get; }
+
+    public string SdeFreshnessText
+    {
+        get => sdeFreshnessText;
+        private set => SetProperty(ref sdeFreshnessText, value);
+    }
+
+    public string MarketFreshnessText
+    {
+        get => marketFreshnessText;
+        private set => SetProperty(ref marketFreshnessText, value);
+    }
+
+    public string CostIndexFreshnessText
+    {
+        get => costIndexFreshnessText;
+        private set => SetProperty(ref costIndexFreshnessText, value);
+    }
+
     public int SelectedWorkspaceTab
     {
         get => selectedWorkspaceTab;
@@ -411,10 +445,20 @@ public sealed class MainWindowViewModel : ObservableObject
         {
             if (SetProperty(ref selectedBlueprint, value))
             {
+                ProductionTree.Clear();
+                if (value is not null)
+                {
+                    MaterialEfficiency = value.ActivityType == BlueprintActivityType.Reaction ? 0 : 10;
+                    TimeEfficiency = value.ActivityType == BlueprintActivityType.Reaction ? 0 : 20;
+                }
+
+                OnPropertyChanged(nameof(IsFinalEfficiencyEditable));
                 RaiseCommandStates();
             }
         }
     }
+
+    public bool IsFinalEfficiencyEditable => SelectedBlueprint?.ActivityType != BlueprintActivityType.Reaction;
 
     public int Runs
     {
@@ -1363,6 +1407,7 @@ public sealed class MainWindowViewModel : ObservableObject
 
             FacilitySystemCostIndex = costIndex.CostIndex;
             FacilityCostIndexStatus = $"ESI {SelectedFacilityService.Name} index as of {costIndex.AsOf.LocalDateTime:g}.";
+            RefreshDataFreshness();
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or HttpRequestException or JsonException or TaskCanceledException)
         {
@@ -1371,6 +1416,11 @@ public sealed class MainWindowViewModel : ObservableObject
     }
 
     private async Task CalculateAsync()
+    {
+        await CalculateAndApplyAsync(CancellationToken.None);
+    }
+
+    private async Task CalculateAndApplyAsync(CancellationToken cancellationToken)
     {
         if (SelectedBlueprint is null)
         {
@@ -1382,7 +1432,7 @@ public sealed class MainWindowViewModel : ObservableObject
 
         try
         {
-            Result = await calculator.CalculateAsync(CreateManufacturingRequest(SelectedBlueprint.BlueprintId), CancellationToken.None);
+            Result = await calculator.CalculateAsync(CreateManufacturingRequest(SelectedBlueprint.BlueprintId), cancellationToken);
 
             Materials.Clear();
             foreach (var material in AggregateMaterialsForDisplay(Result.Materials))
@@ -1391,9 +1441,14 @@ public sealed class MainWindowViewModel : ObservableObject
             }
 
             shoppingList = shoppingListService.CreateFromManufacturingResult(Result);
+            RefreshProductionTree(Result);
+            RefreshDataFreshness();
             OnPropertyChanged(nameof(ShoppingListText));
             OnPropertyChanged(nameof(MaterialAuditSummaryText));
             StatusText = "Calculation complete";
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
         }
         catch (Exception ex)
         {
@@ -1403,6 +1458,100 @@ public sealed class MainWindowViewModel : ObservableObject
         {
             IsBusy = false;
             RaiseCommandStates();
+        }
+    }
+
+    private void RefreshProductionTree(ManufacturingResult calculationResult)
+    {
+        var nodes = calculationResult.ProductionJobs
+            .GroupBy(job => new
+            {
+                job.BlueprintId,
+                job.ParentBlueprintId,
+                job.ProductName,
+                job.ActivityType,
+                job.FacilityName,
+                job.Depth,
+                job.MaterialEfficiency,
+                job.TimeEfficiency
+            })
+            .Select(group => new ProductionTreeNodeViewModel(
+                group.Key.BlueprintId,
+                group.Key.ParentBlueprintId,
+                group.Key.ProductName,
+                group.Key.ActivityType,
+                group.Key.FacilityName,
+                group.Sum(job => job.RequiredQuantity),
+                group.Sum(job => job.TotalRuns),
+                TimeSpan.FromTicks(group.Sum(job => job.TotalTime.Ticks)),
+                group.Key.Depth,
+                group.Key.MaterialEfficiency,
+                group.Key.TimeEfficiency,
+                ScheduleEfficiencyRecalculation))
+            .OrderBy(node => node.Depth)
+            .ThenBy(node => node.ProductName)
+            .ToList();
+
+        foreach (var node in nodes.Where(node => node.ParentBlueprintId is not null))
+        {
+            var parent = nodes.FirstOrDefault(candidate => candidate.BlueprintId == node.ParentBlueprintId);
+            parent?.Children.Add(node);
+        }
+
+        ProductionTree.Clear();
+        foreach (var root in nodes.Where(node => node.ParentBlueprintId is null))
+        {
+            ProductionTree.Add(root);
+        }
+    }
+
+    private void ScheduleEfficiencyRecalculation(BlueprintId blueprintId, int materialEfficiency, int timeEfficiency)
+    {
+        blueprintEfficiencyOverrides[blueprintId] = new BlueprintEfficiencySettings(materialEfficiency, timeEfficiency);
+        efficiencyRecalculation?.Cancel();
+        efficiencyRecalculation?.Dispose();
+        efficiencyRecalculation = new CancellationTokenSource();
+        _ = RecalculateAfterEfficiencyChangeAsync(efficiencyRecalculation.Token);
+    }
+
+    private async Task RefreshSdeAsync()
+    {
+        IsBusy = true;
+        try
+        {
+            var refreshed = await SdeDownloadService.EnsureAvailableAsync(
+                new Progress<string>(message => StatusText = message),
+                CancellationToken.None,
+                forceRefresh: true);
+            RefreshDataFreshness();
+            StatusText = refreshed
+                ? "SDE refreshed. Restart the application to load the new blueprint data."
+                : "SDE refresh failed; the currently loaded data remains available.";
+        }
+        finally
+        {
+            IsBusy = false;
+            RaiseCommandStates();
+        }
+    }
+
+    private void RefreshDataFreshness()
+    {
+        var snapshot = dataFreshnessService.GetSnapshot();
+        SdeFreshnessText = snapshot.SdeText;
+        MarketFreshnessText = snapshot.MarketText;
+        CostIndexFreshnessText = snapshot.CostIndexText;
+    }
+
+    private async Task RecalculateAfterEfficiencyChangeAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(300, cancellationToken);
+            await CalculateAndApplyAsync(cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
         }
     }
 
@@ -1469,6 +1618,9 @@ public sealed class MainWindowViewModel : ObservableObject
             Lines = requestLines,
             MaterialEfficiency = requestMaterialEfficiency,
             TimeEfficiency = requestTimeEfficiency,
+            DefaultComponentMaterialEfficiency = 10,
+            DefaultComponentTimeEfficiency = 20,
+            BlueprintEfficiencyOverrides = new Dictionary<BlueprintId, BlueprintEfficiencySettings>(blueprintEfficiencyOverrides),
             AdditionalCosts = requestAdditionalCosts,
             EnableBuildBuy = EnableBuildBuy,
             BuildBuyDepth = SelectedBuildBuyDepth.Depth,
@@ -1623,6 +1775,12 @@ public sealed class MainWindowViewModel : ObservableObject
 
     private string BuildMarketScannerCacheKey()
     {
+        var efficiencySignature = string.Join(
+            ",",
+            blueprintEfficiencyOverrides
+                .OrderBy(entry => entry.Key.Value)
+                .Select(entry => $"{entry.Key.Value}:{entry.Value.MaterialEfficiency}:{entry.Value.TimeEfficiency}"));
+
         return string.Join(
             "|",
             SelectedMarketScannerFilter.Filter,
@@ -1644,7 +1802,8 @@ public sealed class MainWindowViewModel : ObservableObject
             SelectedProductPriceStrategy.Selection,
             SelectedFinalProductFacility.Id,
             SelectedComponentFacility.Id,
-            SelectedReactionFacility.Id);
+            SelectedReactionFacility.Id,
+            efficiencySignature);
     }
 
     private static bool MatchesMarketScannerFilter(BlueprintCatalogItem item, MarketScannerFilter filter)
@@ -2517,6 +2676,11 @@ public sealed class MainWindowViewModel : ObservableObject
         if (RunMarketScannerCommand is AsyncRelayCommand scannerCommand)
         {
             scannerCommand.RaiseCanExecuteChanged();
+        }
+
+        if (RefreshSdeCommand is AsyncRelayCommand refreshSdeCommand)
+        {
+            refreshSdeCommand.RaiseCanExecuteChanged();
         }
 
         RaiseProductionLedgerCommandStates();
